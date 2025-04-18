@@ -1,383 +1,355 @@
-# role_manager_bot.py
+# slash_role_manager_bot.py
 
 import discord
+from discord import app_commands # Import app_commands
 from discord.ext import commands
 from discord.utils import get
-import os # Import the os module to access environment variables
+import os
 
 # --- Configuration ---
-# Load the bot token from an environment variable for security.
-# You will set this variable on your hosting platform (e.g., Railway).
 BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 if not BOT_TOKEN:
-    # If the environment variable is not set, print an error and exit.
-    # This prevents the bot from running without a token.
     print("❌ FATAL ERROR: The DISCORD_BOT_TOKEN environment variable is not set.")
     print("   Please set this variable in your hosting environment (e.g., Railway Variables).")
-    exit() # Stop the script
+    exit()
 
-COMMAND_PREFIX = "!" # You can change this command prefix
-
-# --- Intents Configuration (Required for modern discord.py) ---
+# Using commands.Bot still works fine for handling events and the basic structure
+# but we will primarily use bot.tree for app commands.
 intents = discord.Intents.default()
-intents.members = True  # Required to access member information (joining, roles)
-intents.message_content = True # Required to read message content for commands
+intents.members = True
+intents.message_content = True # Keep for potential future prefix commands or message listeners
 
-# --- Bot Initialization ---
-# help_command=None disables the default help to use our custom one.
-bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
+# help_command=None as slash commands have built-in help via Discord UI
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # --- Event: Bot Ready ---
 @bot.event
 async def on_ready():
-    """Prints a message to the console when the bot has successfully connected."""
+    """Called when the bot is ready and has finished syncing commands."""
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
-    print(f'Command Prefix: {COMMAND_PREFIX}')
-    print('Bot is ready and listening for commands.')
+    print('Syncing application commands...')
+    try:
+        # Sync commands globally. Can take up to an hour to propagate initially.
+        # For testing on a single server, use:
+        # synced = await bot.tree.sync(guild=discord.Object(id=YOUR_SERVER_ID))
+        # Replace YOUR_SERVER_ID with your actual server ID (as an integer)
+        synced = await bot.tree.sync()
+        print(f'Synced {len(synced)} application command(s).')
+    except Exception as e:
+        print(f'Error syncing commands: {e}')
+    print('Bot is ready!')
     print('------')
-    # Set a custom status activity (optional)
-    await bot.change_presence(activity=discord.Game(name=f"Role Management | {COMMAND_PREFIX}help"))
+    await bot.change_presence(activity=discord.Game(name="/help for commands"))
 
-# --- Event: Command Error Handling ---
-@bot.event
-async def on_command_error(ctx, error):
-    """Handles common command errors and provides user-friendly feedback."""
-    if isinstance(error, commands.CommandNotFound):
-        # Optionally, inform the user the command doesn't exist, or just ignore.
-        # await ctx.send(f"❓ Unknown command. Try `{COMMAND_PREFIX}help`.")
-        return # Keep it silent for unknown commands
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ **Error:** Missing required argument: `{error.param.name}`.\nUse `{COMMAND_PREFIX}help {ctx.command.name}` for usage details.")
-    elif isinstance(error, commands.MissingPermissions):
+# --- App Command Error Handling ---
+# We need a specific listener for app command errors
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Handles errors specifically for application commands."""
+    if isinstance(error, app_commands.CommandNotFound):
+        await interaction.response.send_message("Sorry, I don't recognize that command.", ephemeral=True)
+    elif isinstance(error, app_commands.MissingPermissions):
         missing_perms = ", ".join(f"`{perm}`" for perm in error.missing_permissions)
-        await ctx.send(f"🚫 **Permission Denied:** You need the following permission(s) to use this command: {missing_perms}.")
-    elif isinstance(error, commands.BotMissingPermissions):
+        await interaction.response.send_message(f"🚫 **Permission Denied:** You need the following permission(s) to use this command: {missing_perms}.", ephemeral=True)
+    elif isinstance(error, app_commands.BotMissingPermissions):
         missing_perms = ", ".join(f"`{perm}`" for perm in error.missing_permissions)
-        await ctx.send(f"🤖 **Bot Permission Error:** I don't have the required permission(s) to do that: {missing_perms}. Please grant me the necessary permissions in Server Settings -> Roles.")
-    elif isinstance(error, commands.MemberNotFound):
-        await ctx.send(f"❓ **Error:** Could not find the member: `{error.argument}`. Please mention them correctly (`@User`) or use their exact User ID.")
-    elif isinstance(error, commands.RoleNotFound):
-         # Note: RoleNotFound might not be directly raised by default converters;
-         # 'get' returning None is handled within commands. This is more for custom converters.
-         await ctx.send(f"❓ **Error:** Could not find a role named: `{error.argument}`. Make sure the name is exact (case-sensitive).")
-    elif isinstance(error, commands.CommandInvokeError):
-        # Errors raised within the command's execution
+        await interaction.response.send_message(f"🤖 **Bot Permission Error:** I don't have the required permission(s) to do that: {missing_perms}. Please grant me the necessary permissions.", ephemeral=True)
+    elif isinstance(error, app_commands.CheckFailure): # Catches failed permission checks or custom checks
+        await interaction.response.send_message("🚫 You do not have permission to use this command.", ephemeral=True)
+    elif isinstance(error, app_commands.CommandInvokeError):
+         # Errors raised within the command's execution
         original = error.original
         if isinstance(original, discord.Forbidden):
-             # This specifically catches 403 Forbidden errors from Discord API
-             await ctx.send(f"🚫 **Discord Permissions Error:** I lack the necessary permissions on Discord's side to perform this action. This often happens due to **role hierarchy** (my highest role must be above the role/member I'm trying to manage) or missing permissions in the channel/server.")
+             # Discord API permission errors (often hierarchy)
+             await interaction.response.send_message(f"🚫 **Discord Permissions Error:** I lack the necessary permissions on Discord's side to perform this action. This often happens due to **role hierarchy** (my highest role must be above the role/member I'm trying to manage) or missing permissions.", ephemeral=True)
         else:
-            # For other errors within the command, log them and notify user
-            print(f'Unhandled error in command {ctx.command}: {original}')
-            await ctx.send("⚙️ An unexpected error occurred while running the command. The issue has been logged.")
+            print(f'Unhandled error in app command {interaction.command.name if interaction.command else "Unknown"}: {original}')
+            # Send a generic error message, possibly deferring if not already done
+            if not interaction.response.is_done():
+                await interaction.response.send_message("⚙️ An unexpected error occurred while running the command.", ephemeral=True)
+            else: # If we already deferred, use followup
+                await interaction.followup.send("⚙️ An unexpected error occurred while running the command.", ephemeral=True)
     else:
-        # Catch-all for other discord.py command errors
-        print(f'Unhandled command error type: {type(error).__name__} - {error}')
-        await ctx.send("🤔 An unknown error occurred while processing the command.")
-
-# --- Custom Help Command ---
-@bot.command(name='help', aliases=['h', 'commands'])
-async def custom_help(ctx, *, command_name: str = None):
-    """Shows help information for commands."""
-    prefix = COMMAND_PREFIX # Get the bot's prefix for display
-
-    if command_name:
-        command = bot.get_command(command_name.lower()) # Allow case-insensitive lookup
-        if command:
-            # Show help for a specific command
-            embed = discord.Embed(
-                title=f"Command: {prefix}{command.name}",
-                description=command.help or "No detailed description provided.",
-                color=discord.Color.green() # Specific command help color
-            )
-            if command.aliases:
-                embed.add_field(name="Aliases", value=", ".join(f"`{prefix}{alias}`" for alias in command.aliases), inline=False)
-            # Construct usage string, handling potential lack of signature
-            signature = command.signature or ""
-            usage = f"`{prefix}{command.name} {signature}`"
-            embed.add_field(name="Usage", value=usage, inline=False)
-            await ctx.send(embed=embed)
+        print(f'Unhandled app command error type: {type(error).__name__} - {error}')
+        if not interaction.response.is_done():
+            await interaction.response.send_message("🤔 An unknown error occurred.", ephemeral=True)
         else:
-            await ctx.send(f"❓ Command `{command_name}` not found. Use `{prefix}help` to see all commands.")
-    else:
-        # Show general help embed listing all commands
-        embed = discord.Embed(
-            title="🤖 GJ Team Role Manager Bot Help",
-            description=f"Hello! Here are the commands available. My prefix is `{prefix}`.",
-            color=discord.Color.purple() # General help color
-        )
-        # Group commands for better readability
-        role_mgmt_cmds = []
-        other_cmds = []
+             await interaction.followup.send("🤔 An unknown error occurred.", ephemeral=True)
 
-        for command in bot.commands:
-            if command.hidden: # Skip hidden commands if any
-                continue
-            if command.name in ['createrole', 'deleterole', 'giverole', 'takerole']:
-                 # Add brief description or rely on the field value below
-                 role_mgmt_cmds.append(f"`{prefix}{command.name}`")
-            elif command.name == 'help':
-                 other_cmds.append(f"`{prefix}{command.name}`")
-            # Add other command categories if needed
-
-        if role_mgmt_cmds:
-             embed.add_field(
-                 name="🛠️ Role Management",
-                 value=(f"`{prefix}createrole <Role Name>` - Creates a new role.\n"
-                        f"`{prefix}deleterole <Role Name>` - Deletes a role.\n"
-                        f"`{prefix}giverole <@Member> <Role Name>` - Assigns a role.\n"
-                        f"`{prefix}takerole <@Member> <Role Name>` - Removes a role."),
-                 inline=False
-             )
-
-        if other_cmds:
-            embed.add_field(
-                name="ℹ️ Other",
-                value=(f"`{prefix}help [Command Name]` - Shows this message or command details."),
-                inline=False
-            )
-
-        embed.set_footer(text="<> = Required Argument, [] = Optional Argument. You need 'Manage Roles' permission for most commands.")
-        await ctx.send(embed=embed)
+# Add the error handler to the tree
+bot.tree.on_error = on_app_command_error
 
 
-# --- Command: Create Role ---
-@bot.command(name='createrole')
-@commands.has_permissions(manage_roles=True) # User needs Manage Roles perm
-@commands.bot_has_permissions(manage_roles=True) # Bot needs Manage Roles perm
-async def create_role(ctx, *, role_name: str):
-    """Creates a new role with the specified name.
-    Usage: !createrole <Role Name>
-    Example: !createrole TSB Legend
-    """
-    guild = ctx.guild
-    # Check if role already exists (case-sensitive check recommended by discord.py utils)
+# --- Slash Command: Help ---
+@bot.tree.command(name="help", description="Shows information about available commands.")
+async def slash_help(interaction: discord.Interaction):
+    """Provides help information via slash command."""
+    embed = discord.Embed(
+        title="🤖 GJ Team Role Manager Bot Help",
+        description="Here are the available slash commands:",
+        color=discord.Color.purple()
+    )
+    # Manually list commands as bot.commands won't easily list app commands for help embeds
+    embed.add_field(
+        name="🛠️ Role Management",
+        value=("/createrole `role_name` - Creates a new role.\n"
+               "/deleterole `role_name` - Deletes a role.\n"
+               "/giverole `user` `role_name` - Assigns a role.\n"
+               "/takerole `user` `role_name` - Removes a role."),
+        inline=False
+    )
+    embed.add_field(
+        name="ℹ️ Other",
+        value="/help - Shows this message.",
+        inline=False
+    )
+    embed.set_footer(text="You need 'Manage Roles' permission for most role commands.")
+    # Use ephemeral=True to only show the message to the user who used the command
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# --- Slash Command: Create Role ---
+# Use describe decorator for better help text in Discord UI
+@bot.tree.command(name="createrole", description="Creates a new role in the server.")
+@app_commands.describe(role_name="The exact name for the new role.")
+@app_commands.checks.has_permissions(manage_roles=True) # User permission check
+@app_commands.checks.bot_has_permissions(manage_roles=True) # Bot permission check
+async def slash_createrole(interaction: discord.Interaction, role_name: str):
+    """Slash command to create a new role."""
+    guild = interaction.guild
+    if not guild: # Should not happen in guild commands, but good practice
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
     existing_role = get(guild.roles, name=role_name)
     if existing_role:
-        await ctx.send(f"⚠️ A role named **{role_name}** already exists in this server!")
+        await interaction.response.send_message(f"⚠️ A role named **{role_name}** already exists!", ephemeral=True)
         return
 
-    # Limit role name length (Discord limit is 100)
     if len(role_name) > 100:
-        await ctx.send("❌ Role name cannot be longer than 100 characters.")
+        await interaction.response.send_message("❌ Role name cannot be longer than 100 characters.", ephemeral=True)
         return
 
     try:
-        # Create the role with default permissions and color
-        new_role = await guild.create_role(name=role_name, reason=f"Created by {ctx.author} via bot command.")
-        await ctx.send(f"✅ Successfully created role: {new_role.mention}")
+        # Defer the response as role creation might take a moment
+        await interaction.response.defer(ephemeral=True) # ephemeral=True makes deferral message hidden
+        new_role = await guild.create_role(name=role_name, reason=f"Created by {interaction.user} via slash command.")
+        # Use followup after deferring
+        await interaction.followup.send(f"✅ Successfully created role: {new_role.mention}", ephemeral=False) # Make success message visible
     except discord.Forbidden:
-        # This should be caught by @bot_has_permissions, but good to have as fallback
-        await ctx.send("🚫 **Bot Permission Error:** I don't have permission to create roles.")
-    except discord.HTTPException as e:
-        await ctx.send(f"⚙️ An HTTP error occurred while creating the role: {e}")
+        # This error should ideally be caught by the BotMissingPermissions handler,
+        # but can be caught here as a fallback.
+        if not interaction.response.is_done(): # Check if we already responded (e.g., in defer)
+             await interaction.response.send_message("🚫 **Bot Permission Error:** I don't have permission to create roles.", ephemeral=True)
+        else:
+             await interaction.followup.send("🚫 **Bot Permission Error:** I don't have permission to create roles.", ephemeral=True)
     except Exception as e:
-        await ctx.send(f"⚙️ An unexpected error occurred while creating the role: {e}")
+        print(f"Error in /createrole: {e}")
+        if not interaction.response.is_done():
+             await interaction.response.send_message(f"⚙️ An unexpected error occurred: {e}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"⚙️ An unexpected error occurred: {e}", ephemeral=True)
 
+# --- Slash Command: Delete Role ---
+@bot.tree.command(name="deleterole", description="Deletes an existing role by its exact name.")
+@app_commands.describe(role_name="The exact name of the role to delete.")
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.checks.bot_has_permissions(manage_roles=True)
+async def slash_deleterole(interaction: discord.Interaction, role_name: str):
+    """Slash command to delete a role."""
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
 
-# --- Command: Delete Role ---
-@bot.command(name='deleterole')
-@commands.has_permissions(manage_roles=True)
-@commands.bot_has_permissions(manage_roles=True)
-async def delete_role(ctx, *, role_name: str):
-    """Deletes an existing role by its exact name.
-    Usage: !deleterole <Role Name>
-    Example: !deleterole Old Role
-    The bot's role must be higher than the role being deleted.
-    """
-    guild = ctx.guild
-    # Find the role by name (case-sensitive)
     role_to_delete = get(guild.roles, name=role_name)
-
     if not role_to_delete:
-        await ctx.send(f"❓ Could not find a role named **{role_name}**. Remember, names are case-sensitive.")
+        await interaction.response.send_message(f"❓ Could not find a role named **{role_name}**. Remember, names are case-sensitive.", ephemeral=True)
         return
 
-    # Safety Checks
-    if role_to_delete == guild.default_role: # @everyone role
-        await ctx.send("🚫 Cannot delete the `@everyone` role.")
+    # Safety Checks (similar to before)
+    if role_to_delete == guild.default_role:
+        await interaction.response.send_message("🚫 Cannot delete the `@everyone` role.", ephemeral=True)
         return
-    if role_to_delete >= ctx.guild.me.top_role and ctx.guild.me != guild.owner:
-         # Check if bot is owner, owner bypasses hierarchy
-        await ctx.send(f"🚫 **Hierarchy Error:** I cannot delete the role {role_to_delete.mention} because it is higher than or equal to my highest role. Please move my role higher in Server Settings -> Roles.")
+    if role_to_delete >= guild.me.top_role and guild.me != guild.owner:
+        await interaction.response.send_message(f"🚫 **Hierarchy Error:** I cannot delete {role_to_delete.mention} as it's higher than or equal to my role.", ephemeral=True)
         return
     if role_to_delete.is_integration() or role_to_delete.is_premium_subscriber() or role_to_delete.is_bot_managed():
-         await ctx.send(f"⚠️ Cannot delete the role {role_to_delete.mention} because it is managed by Discord or an integration (e.g., Twitch, Bot specific role, Booster role).")
+         await interaction.response.send_message(f"⚠️ Cannot delete {role_to_delete.mention} as it's managed by Discord or an integration.", ephemeral=True)
          return
 
     try:
-        role_mention = role_to_delete.mention # Save mention in case needed after deletion
+        await interaction.response.defer(ephemeral=True)
         role_name_saved = role_to_delete.name
-        await role_to_delete.delete(reason=f"Deleted by {ctx.author} via bot command.")
-        await ctx.send(f"✅ Successfully deleted role: **{role_name_saved}**")
+        await role_to_delete.delete(reason=f"Deleted by {interaction.user} via slash command.")
+        await interaction.followup.send(f"✅ Successfully deleted role: **{role_name_saved}**", ephemeral=False) # Visible confirmation
     except discord.Forbidden:
-        await ctx.send(f"🚫 **Bot Permission Error:** I don't have permission to delete the role {role_name}. This could also be a hierarchy issue.")
-    except discord.HTTPException as e:
-        await ctx.send(f"⚙️ An HTTP error occurred while deleting the role: {e}")
+         if not interaction.response.is_done(): await interaction.response.send_message("🚫 **Bot Permission Error:** I lack permission to delete this role.", ephemeral=True)
+         else: await interaction.followup.send("🚫 **Bot Permission Error:** I lack permission to delete this role.", ephemeral=True)
     except Exception as e:
-        await ctx.send(f"⚙️ An unexpected error occurred while deleting the role: {e}")
+        print(f"Error in /deleterole: {e}")
+        if not interaction.response.is_done(): await interaction.response.send_message(f"⚙️ An unexpected error occurred: {e}", ephemeral=True)
+        else: await interaction.followup.send(f"⚙️ An unexpected error occurred: {e}", ephemeral=True)
 
+# --- Slash Command: Give Role ---
+# Use discord.Member type hint for user input
+@bot.tree.command(name="giverole", description="Assigns a role to a specified member.")
+@app_commands.describe(user="The user to give the role to.", role_name="The exact name of the role to assign.")
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.checks.bot_has_permissions(manage_roles=True)
+async def slash_giverole(interaction: discord.Interaction, user: discord.Member, role_name: str):
+    """Slash command to give a role to a member."""
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
 
-# --- Command: Give Role ---
-@bot.command(name='giverole')
-@commands.has_permissions(manage_roles=True)
-@commands.bot_has_permissions(manage_roles=True)
-async def give_role(ctx, member: discord.Member, *, role_name: str):
-    """Assigns an existing role to a specified member.
-    Usage: !giverole <@Member> <Role Name>
-    Example: !giverole @Puneet TSB Legend
-    The bot's role must be higher than the role being assigned.
-    """
-    guild = ctx.guild
-    role_to_give = get(guild.roles, name=role_name) # Case-sensitive lookup
-
+    role_to_give = get(guild.roles, name=role_name)
     if not role_to_give:
-        await ctx.send(f"❓ Could not find a role named **{role_name}**. Check spelling and case.")
+        await interaction.response.send_message(f"❓ Could not find a role named **{role_name}**. Check spelling and case.", ephemeral=True)
         return
 
-    # Hierarchy Check: Bot vs Role to Give
-    if role_to_give >= ctx.guild.me.top_role and ctx.guild.me != guild.owner:
-        await ctx.send(f"🚫 **Hierarchy Error:** I cannot assign the role {role_to_give.mention} because it is higher than or equal to my highest role. Please move my role higher.")
+    # Hierarchy Checks
+    if role_to_give >= guild.me.top_role and guild.me != guild.owner:
+        await interaction.response.send_message(f"🚫 **Hierarchy Error:** I cannot assign {role_to_give.mention} as it's higher than or equal to my role.", ephemeral=True)
         return
-    # Hierarchy Check: Command User vs Role to Give (Prevent mods giving roles above them)
-    if role_to_give >= ctx.author.top_role and ctx.author != guild.owner:
-        await ctx.send(f"🚫 **Permission Denied:** You cannot assign the role {role_to_give.mention} because it is higher than or equal to your own highest role.")
+    # Prevent users from assigning roles higher than themselves
+    if role_to_give >= interaction.user.top_role and interaction.user != guild.owner:
+        await interaction.response.send_message(f"🚫 **Permission Denied:** You cannot assign {role_to_give.mention} as it's higher than or equal to your own highest role.", ephemeral=True)
         return
-    # Check if member already has the role
-    if role_to_give in member.roles:
-        await ctx.send(f"ℹ️ {member.mention} already has the role {role_to_give.mention}.")
+    if role_to_give in user.roles:
+        await interaction.response.send_message(f"ℹ️ {user.mention} already has the role {role_to_give.mention}.", ephemeral=True)
         return
 
     try:
-        await member.add_roles(role_to_give, reason=f"Role added by {ctx.author} via bot command.")
-        await ctx.send(f"✅ Successfully gave the role {role_to_give.mention} to {member.mention}.")
+        await interaction.response.defer(ephemeral=True)
+        await user.add_roles(role_to_give, reason=f"Role added by {interaction.user} via slash command.")
+        await interaction.followup.send(f"✅ Successfully gave the role {role_to_give.mention} to {user.mention}.", ephemeral=False)
     except discord.Forbidden:
-        await ctx.send(f"🚫 **Bot Permission Error:** I lack permission to assign the role {role_to_give.mention}. Check my permissions and role hierarchy.")
-    except discord.HTTPException as e:
-        await ctx.send(f"⚙️ An HTTP error occurred while giving the role: {e}")
+         if not interaction.response.is_done(): await interaction.response.send_message("🚫 **Bot Permission Error:** I lack permission to assign this role.", ephemeral=True)
+         else: await interaction.followup.send("🚫 **Bot Permission Error:** I lack permission to assign this role.", ephemeral=True)
     except Exception as e:
-        await ctx.send(f"⚙️ An unexpected error occurred while giving the role: {e}")
+        print(f"Error in /giverole: {e}")
+        if not interaction.response.is_done(): await interaction.response.send_message(f"⚙️ An unexpected error occurred: {e}", ephemeral=True)
+        else: await interaction.followup.send(f"⚙️ An unexpected error occurred: {e}", ephemeral=True)
 
 
-# --- Command: Take Role ---
-@bot.command(name='takerole')
-@commands.has_permissions(manage_roles=True)
-@commands.bot_has_permissions(manage_roles=True)
-async def take_role(ctx, member: discord.Member, *, role_name: str):
-    """Removes a specific role from the specified member.
-    Usage: !takerole <@Member> <Role Name>
-    Example: !takerole @Puneet TSB Rookie
-    The bot's role must be higher than the role being removed.
-    """
-    guild = ctx.guild
-    role_to_take = get(guild.roles, name=role_name) # Case-sensitive lookup
+# --- Slash Command: Take Role ---
+@bot.tree.command(name="takerole", description="Removes a role from a specified member.")
+@app_commands.describe(user="The user to remove the role from.", role_name="The exact name of the role to remove.")
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.checks.bot_has_permissions(manage_roles=True)
+async def slash_takerole(interaction: discord.Interaction, user: discord.Member, role_name: str):
+    """Slash command to remove a role from a member."""
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
 
+    role_to_take = get(guild.roles, name=role_name)
     if not role_to_take:
-        await ctx.send(f"❓ Could not find a role named **{role_name}**. Check spelling and case.")
+        await interaction.response.send_message(f"❓ Could not find a role named **{role_name}**. Check spelling and case.", ephemeral=True)
         return
 
-    # Hierarchy Check: Bot vs Role to Take
-    if role_to_take >= ctx.guild.me.top_role and ctx.guild.me != guild.owner:
-        await ctx.send(f"🚫 **Hierarchy Error:** I cannot remove the role {role_to_take.mention} because it is higher than or equal to my highest role.")
+    # Hierarchy Checks
+    if role_to_take >= guild.me.top_role and guild.me != guild.owner:
+        await interaction.response.send_message(f"🚫 **Hierarchy Error:** I cannot remove {role_to_take.mention} as it's higher than or equal to my role.", ephemeral=True)
         return
-    # Hierarchy Check: Command User vs Role to Take
-    if role_to_take >= ctx.author.top_role and ctx.author != guild.owner:
-        await ctx.send(f"🚫 **Permission Denied:** You cannot remove the role {role_to_take.mention} because it is higher than or equal to your own highest role.")
+    if role_to_take >= interaction.user.top_role and interaction.user != guild.owner:
+        await interaction.response.send_message(f"🚫 **Permission Denied:** You cannot remove {role_to_take.mention} as it's higher than or equal to your own highest role.", ephemeral=True)
         return
-    # Check if member actually has the role
-    if role_to_take not in member.roles:
-        await ctx.send(f"ℹ️ {member.mention} doesn't have the role {role_to_take.mention}.")
+    if role_to_take not in user.roles:
+        await interaction.response.send_message(f"ℹ️ {user.mention} doesn't have the role {role_to_take.mention}.", ephemeral=True)
         return
-    # Prevent removing integration/booster roles via this command
     if role_to_take.is_integration() or role_to_take.is_premium_subscriber() or role_to_take.is_bot_managed():
-         await ctx.send(f"⚠️ Cannot remove the role {role_to_take.mention} via this command as it is managed by Discord or an integration.")
+         await interaction.response.send_message(f"⚠️ Cannot remove {role_to_take.mention} via this command as it's managed by Discord or an integration.", ephemeral=True)
          return
 
     try:
-        await member.remove_roles(role_to_take, reason=f"Role removed by {ctx.author} via bot command.")
-        await ctx.send(f"✅ Successfully removed the role {role_to_take.mention} from {member.mention}.")
+        await interaction.response.defer(ephemeral=True)
+        await user.remove_roles(role_to_take, reason=f"Role removed by {interaction.user} via slash command.")
+        await interaction.followup.send(f"✅ Successfully removed the role {role_to_take.mention} from {user.mention}.", ephemeral=False)
     except discord.Forbidden:
-         await ctx.send(f"🚫 **Bot Permission Error:** I lack permission to remove the role {role_to_take.mention}. Check my permissions and role hierarchy.")
-    except discord.HTTPException as e:
-        await ctx.send(f"⚙️ An HTTP error occurred while removing the role: {e}")
+         if not interaction.response.is_done(): await interaction.response.send_message("🚫 **Bot Permission Error:** I lack permission to remove this role.", ephemeral=True)
+         else: await interaction.followup.send("🚫 **Bot Permission Error:** I lack permission to remove this role.", ephemeral=True)
     except Exception as e:
-        await ctx.send(f"⚙️ An unexpected error occurred while removing the role: {e}")
+        print(f"Error in /takerole: {e}")
+        if not interaction.response.is_done(): await interaction.response.send_message(f"⚙️ An unexpected error occurred: {e}", ephemeral=True)
+        else: await interaction.followup.send(f"⚙️ An unexpected error occurred: {e}", ephemeral=True)
 
+# --- Placeholder for Your Highly Customized Assignment Logic (using App Commands) ---
+# Example: Command to update TSB rank (you'd still need a verification process)
+@bot.tree.command(name="verify_tsb_kills", description="(Admin) Verifies kills and updates TSB rank.")
+@app_commands.describe(user="The user whose rank to update.", kills="The verified number of kills.")
+@app_commands.checks.has_permissions(manage_roles=True) # Or a custom check/role check
+async def slash_verify_tsb_kills(interaction: discord.Interaction, user: discord.Member, kills: int):
+    await interaction.response.defer(ephemeral=True) # Defer as this might involve multiple steps
 
-# --- Placeholder for Your Highly Customized Assignment Logic ---
-# You would add more @bot.command() or @bot.event listeners here
-# based on your specific custom logic requirements. For example:
-#
-# @bot.listen('on_message')
-# async def on_message_leveling(message):
-#     # Basic leveling system logic (requires storing XP, usually in a database)
-#     if message.author.bot: return # Ignore bots
-#     # Add XP logic here...
-#     # Check if user leveled up...
-#     # If leveled up, find the appropriate role and assign it using add_roles
-#     pass # Placeholder
-#
-# @bot.command(name='verifytsbkills')
-# @commands.has_permissions(manage_roles=True) # Only allow specific users to verify
-# async def verify_tsb_kills(ctx, member: discord.Member, kills: int):
-#     """(Admin Only) Verifies kills and updates TSB rank role."""
-#     # 1. Define kill thresholds and corresponding role names/IDs
-#     ranks = {
-#         50000: "TSB Apex", 40000: "TSB Legend", 30000: "TSB Grandmaster",
-#         20000: "TSB Strong", 10000: "TSB Elite", 5000: "TSB Adept", 0: "TSB Player"
-#     }
-#     target_role_name = None
-#     for threshold, name in sorted(ranks.items(), reverse=True):
-#         if kills >= threshold:
-#             target_role_name = name
-#             break
-#
-#     if not target_role_name:
-#         await ctx.send("Could not determine rank for the specified kills.")
-#         return
-#
-#     target_role = get(ctx.guild.roles, name=target_role_name)
-#     if not target_role:
-#         await ctx.send(f"Error: Target rank role '{target_role_name}' not found in the server.")
-#         return
-#
-#     # 2. Remove existing TSB rank roles (be careful with implementation)
-#     tsb_rank_role_names = list(ranks.values()) # Get all possible rank names
-#     roles_to_remove = [role for role in member.roles if role.name in tsb_rank_role_names and role != target_role]
-#     if roles_to_remove:
-#         try:
-#             await member.remove_roles(*roles_to_remove, reason="Updating TSB Rank")
-#         except Exception as e:
-#             await ctx.send(f"Error removing old rank roles: {e}")
-#             # Decide whether to proceed or stop
-#
-#     # 3. Add the new role if they don't have it
-#     if target_role not in member.roles:
-#         try:
-#             # Ensure bot can assign this role (hierarchy)
-#             if target_role >= ctx.guild.me.top_role and ctx.guild.me != ctx.guild.owner:
-#                  await ctx.send(f"🚫 **Hierarchy Error:** I cannot assign the role {target_role.mention}.")
-#                  return
-#
-#             await member.add_roles(target_role, reason=f"TSB Kills Verified ({kills}) by {ctx.author}")
-#             await ctx.send(f"✅ Updated {member.mention}'s TSB rank to {target_role.mention} based on {kills} kills.")
-#         except Exception as e:
-#             await ctx.send(f"Error assigning new rank role: {e}")
-#     else:
-#         await ctx.send(f"{member.mention} already has the correct rank {target_role.mention} for {kills} kills.")
+    guild = interaction.guild
+    if not guild: # Should be checked by default but good practice
+        await interaction.followup.send("Error: Cannot determine server.", ephemeral=True)
+        return
+
+    # --- Rank Logic (Same as before, but adapted for interaction) ---
+    ranks = { # Role Name mapping
+        50000: "TSB Apex", 40000: "TSB Legend", 30000: "TSB Grandmaster",
+        20000: "TSB Strong", 10000: "TSB Elite", 5000: "TSB Adept", 0: "TSB Player"
+    }
+    target_role_name = None
+    for threshold, name in sorted(ranks.items(), reverse=True):
+        if kills >= threshold:
+            target_role_name = name
+            break
+
+    if not target_role_name:
+        await interaction.followup.send("Could not determine rank for the specified kills.", ephemeral=True)
+        return
+
+    target_role = get(guild.roles, name=target_role_name)
+    if not target_role:
+        await interaction.followup.send(f"Error: Target rank role '{target_role_name}' not found.", ephemeral=True)
+        return
+
+    # --- Remove Old Ranks ---
+    tsb_rank_role_names = list(ranks.values())
+    roles_to_remove = [role for role in user.roles if role.name in tsb_rank_role_names and role != target_role]
+    removed_old = False
+    if roles_to_remove:
+        try:
+            await user.remove_roles(*roles_to_remove, reason=f"Updating TSB Rank via /verify by {interaction.user}")
+            removed_old = True
+        except Exception as e:
+            print(f"Error removing old rank roles for {user}: {e}")
+            await interaction.followup.send(f"⚠️ Error removing old rank roles for {user.mention}, but attempting to add new one.", ephemeral=True)
+            # Decide if you want to stop here or continue
+
+    # --- Add New Rank ---
+    if target_role not in user.roles:
+        try:
+            # Hierarchy check (Bot vs Target Role)
+            if target_role >= guild.me.top_role and guild.me != guild.owner:
+                 await interaction.followup.send(f"🚫 **Hierarchy Error:** I cannot assign the role {target_role.mention}.", ephemeral=True)
+                 return
+
+            await user.add_roles(target_role, reason=f"TSB Kills Verified ({kills}) by {interaction.user} via /verify")
+            await interaction.followup.send(f"✅ Updated {user.mention}'s TSB rank to {target_role.mention} ({kills} kills).", ephemeral=False) # Success message visible
+        except Exception as e:
+            print(f"Error assigning new rank role for {user}: {e}")
+            await interaction.followup.send(f"⚙️ Error assigning the new rank role {target_role.mention} to {user.mention}.", ephemeral=True)
+    elif removed_old: # If old roles were removed but they already had the target role
+         await interaction.followup.send(f"✅ Removed old rank roles for {user.mention}. They already have the correct rank {target_role.mention} for {kills} kills.", ephemeral=False)
+    else: # If they already had the correct role and no old ones were removed
+         await interaction.followup.send(f"ℹ️ {user.mention} already has the correct rank {target_role.mention} for {kills} kills.", ephemeral=True)
 
 
 # --- Run the Bot ---
 if __name__ == "__main__":
-    print("Starting bot...")
+    print("Starting slash command bot...")
     try:
-        # This runs the bot with the token loaded from the environment variable
         bot.run(BOT_TOKEN)
     except discord.LoginFailure:
-        print("❌ FATAL ERROR: Login failed. The provided Discord Bot Token is invalid.")
+        print("❌ FATAL ERROR: Login failed. The DISCORD_BOT_TOKEN is invalid.")
     except discord.PrivilegedIntentsRequired:
         print("❌ FATAL ERROR: Privileged Intents (Server Members and/or Message Content) are required but not enabled.")
         print("   Go to your bot's application page on the Discord Developer Portal and enable them under the 'Bot' tab.")
     except Exception as e:
-        # Catch any other exceptions during startup
         print(f"❌ FATAL ERROR: An error occurred during bot startup: {e}")
