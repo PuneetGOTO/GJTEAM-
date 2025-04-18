@@ -1,0 +1,1 @@
+worker: python role_manager_bot.py
