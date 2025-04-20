@@ -1,4 +1,4 @@
-# slash_role_manager_bot.py (Version with All Features & Corrected Syntax in Bot Spam Role Removal)
+# slash_role_manager_bot.py (Version with All Features, Corrected Syntax & Descriptions)
 
 import discord
 from discord import app_commands
@@ -56,7 +56,7 @@ def get_setting(guild_id: int, key: str):
 def set_setting(guild_id: int, key: str, value):
     if guild_id not in temp_vc_settings: temp_vc_settings[guild_id] = {}
     temp_vc_settings[guild_id][key] = value
-    print(f"[Setting Update] Guild {guild_id}: {key}={value}") # Changed log prefix
+    print(f"[Setting Update] Guild {guild_id}: {key}={value}")
 
 # --- Event: Bot Ready ---
 @bot.event
@@ -82,7 +82,7 @@ async def on_command_error(ctx, error):
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     error_message = "🤔 發生未知的錯誤。"
     ephemeral_response = True
-    # ... (Full error handling logic) ...
+    # (Full error handling logic)
     if isinstance(error, app_commands.CommandNotFound): error_message = "未知的指令。"
     elif isinstance(error, app_commands.MissingPermissions): error_message = f"🚫 你缺少必要權限: {', '.join(f'`{p}`' for p in error.missing_permissions)}。"
     elif isinstance(error, app_commands.BotMissingPermissions): error_message = f"🤖 我缺少必要權限: {', '.join(f'`{p}`' for p in error.missing_permissions)}。"
@@ -125,20 +125,19 @@ async def on_member_join(member: discord.Member):
     welcome_channel = guild.get_channel(welcome_channel_id)
     if welcome_channel and isinstance(welcome_channel, discord.TextChannel):
         try:
-            embed = discord.Embed(title=f"🎉 歡迎來到 {guild.name}! 🎉", description=f"你好 {member.mention}! ...", color=discord.Color.blue()) # Shortened
-            # ...(Rest of welcome embed)...
-            # await welcome_channel.send(embed=embed); print(f"Sent welcome for {member.name}.")
-            pass # Add welcome embed logic
+            embed = discord.Embed(title=f"🎉 歡迎來到 {guild.name}! 🎉", description=f"你好 {member.mention}! 很高興你能加入 **GJ Team**！\n\n👇 **開始之前:**\n- 阅读服务器规则: <#{rules_channel_id}>\n- 了解身份组信息: <#{roles_info_channel_id}>\n- 认证你的TSB实力: <#{verification_channel_id}>\n\n祝你在 GJ Team 玩得愉快!", color=discord.Color.blue())
+            embed.set_thumbnail(url=member.display_avatar.url); embed.set_footer(text=f"你是伺服器的第 {guild.member_count} 位成員！")
+            await welcome_channel.send(embed=embed); print(f"Sent welcome for {member.name}.")
         except Exception as e: print(f"❌ Error sending welcome: {e}")
     elif welcome_channel_id != 123456789012345678: print(f"⚠️ Welcome channel {welcome_channel_id} not found.")
 
 # --- Event: On Message - Handles Spam Detection ---
 @bot.event
 async def on_message(message: discord.Message):
+    # (Full spam detection logic with corrections)
     if not message.guild or message.author.id == bot.user.id: return
     now = datetime.datetime.now(datetime.timezone.utc)
-
-    # --- Bot Spam Detection ---
+    # Bot Spam
     if message.author.bot:
         bot_author_id = message.author.id; bot_message_timestamps.setdefault(bot_author_id, [])
         bot_message_timestamps[bot_author_id].append(now)
@@ -148,7 +147,7 @@ async def on_message(message: discord.Message):
             print(f"🚨 BOT Spam Detected: {message.author} in #{message.channel.name}")
             bot_message_timestamps[bot_author_id] = []
             mod_mentions = " ".join([f"<@&{role_id}>" for role_id in MOD_ALERT_ROLE_IDS]) # !!! Ensure IDs are correct !!!
-            action_summary = "未尝试自动操作。" # Default message
+            action_summary = "未尝试自动操作。"
             spamming_bot_member = message.guild.get_member(bot_author_id)
             my_bot_member = message.guild.me
             if spamming_bot_member:
@@ -163,7 +162,7 @@ async def on_message(message: discord.Message):
                 else: action_summary = "**➡️ 自动操作：机器人缺少“踢出成员”权限，无法尝试踢出。**"; print("   Bot lacks Kick Members permission."); kick_attempted_or_failed = True
 
                 roles_removed_message = ""
-                # --- CORRECTED SYNTAX HERE ---
+                # --- CORRECTED SYNTAX WAS HERE ---
                 if not ("成功" in action_summary and kick_attempted_or_failed) and my_bot_member.guild_permissions.manage_roles:
                     roles_to_try_removing = [r for r in spamming_bot_member.roles if r != message.guild.default_role and r < my_bot_member.top_role]
                     if roles_to_try_removing:
@@ -215,7 +214,7 @@ async def on_message(message: discord.Message):
             else: print("   Bot lacks Manage Msgs perm for cleanup.")
         return # Stop processing for bots
 
-    # --- User Spam Detection Logic ---
+    # --- User Spam Detection ---
     # (User spam logic remains the same)
     # ... (Copy the user spam detection logic here) ...
     author_id = message.author.id; member = message.guild.get_member(author_id)
@@ -246,6 +245,7 @@ async def on_message(message: discord.Message):
         else: # Send warning
             try: await message.channel.send(f"⚠️ {message.author.mention}，請減緩發言！({warning_count}/{KICK_THRESHOLD} 警告)", delete_after=15)
             except Exception as warn_err: print(f"   Error sending warning: {warn_err}")
+
 
 # --- Event: Voice State Update (For Temporary VCs) ---
 @bot.event
@@ -289,9 +289,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             if before.channel.id in temp_vc_owners: del temp_vc_owners[before.channel.id]
             if before.channel.id in temp_vc_created: temp_vc_created.remove(before.channel.id)
 
+# --- Slash Command Definitions ---
+# (All slash commands and command groups copied here)
+# ... (Copy /help, /createrole, /deleterole, /giverole, /takerole, /createseparator, /clear, /warn, /unwarn, /announce functions here) ...
+# ... (Copy manage_group and all its subcommands here) ...
+# ... (Copy voice_group and all its subcommands with corrected syntax here) ...
 
-# --- Slash Command Definitions (Help, Roles, Separator, Clear, Warn, Unwarn, Announce) ---
-# ... (Copy all @bot.tree.command functions here) ...
+# --- Slash Command: Help ---
 @bot.tree.command(name="help", description="顯示可用指令的相關資訊。")
 async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(title="🤖 GJ Team Bot Help", description="可用的斜線指令:", color=discord.Color.purple())
@@ -303,8 +307,7 @@ async def slash_help(interaction: discord.Interaction):
     embed.set_footer(text="<> = 必填, [] = 可選。大部分指令需管理權限。")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# (Add slash_createrole, slash_deleterole, slash_giverole, slash_takerole, slash_createseparator, slash_clear, slash_warn, slash_unwarn, slash_announce functions here as defined previously)
-# ... (Copy functions here) ...
+# --- Slash Command: Create Role ---
 @bot.tree.command(name="createrole", description="在伺服器中創建一個新的身份組。")
 @app_commands.describe(role_name="新身份組的確切名稱。")
 @app_commands.checks.has_permissions(manage_roles=True)
@@ -317,6 +320,7 @@ async def slash_createrole(interaction: discord.Interaction, role_name: str):
     try: new_role = await guild.create_role(name=role_name, reason=f"由 {interaction.user} 創建"); await interaction.followup.send(f"✅ 已創建身份組: {new_role.mention}", ephemeral=False)
     except Exception as e: print(f"Err /createrole: {e}"); await interaction.followup.send(f"⚙️ 創建時出錯: {e}", ephemeral=True)
 
+# --- Slash Command: Delete Role ---
 @bot.tree.command(name="deleterole", description="依據精確名稱刪除一個現有的身份組。")
 @app_commands.describe(role_name="要刪除的身份組的確切名稱。")
 @app_commands.checks.has_permissions(manage_roles=True)
@@ -332,6 +336,7 @@ async def slash_deleterole(interaction: discord.Interaction, role_name: str):
     try: name = role.name; await role.delete(reason=f"由 {interaction.user} 刪除"); await interaction.followup.send(f"✅ 已刪除身份組: **{name}**", ephemeral=False)
     except Exception as e: print(f"Err /deleterole: {e}"); await interaction.followup.send(f"⚙️ 刪除時出錯: {e}", ephemeral=True)
 
+# --- Slash Command: Give Role ---
 @bot.tree.command(name="giverole", description="將一個現有的身份組分配給指定成員。")
 @app_commands.describe(user="要給予身份組的用戶。", role_name="要分配的身份組的確切名稱。")
 @app_commands.checks.has_permissions(manage_roles=True)
@@ -347,6 +352,7 @@ async def slash_giverole(interaction: discord.Interaction, user: discord.Member,
     try: await user.add_roles(role, reason=f"由 {interaction.user} 分配"); await interaction.followup.send(f"✅ 已給予 {user.mention} 身份組 {role.mention}。", ephemeral=False)
     except Exception as e: print(f"Err /giverole: {e}"); await interaction.followup.send(f"⚙️ 分配時出錯: {e}", ephemeral=True)
 
+# --- Slash Command: Take Role ---
 @bot.tree.command(name="takerole", description="從指定成員移除一個特定的身份組。")
 @app_commands.describe(user="要移除其身份組的用戶。", role_name="要移除的身份組的確切名稱。")
 @app_commands.checks.has_permissions(manage_roles=True)
@@ -363,6 +369,7 @@ async def slash_takerole(interaction: discord.Interaction, user: discord.Member,
     try: await user.remove_roles(role, reason=f"由 {interaction.user} 移除"); await interaction.followup.send(f"✅ 已從 {user.mention} 移除身份組 {role.mention}。", ephemeral=False)
     except Exception as e: print(f"Err /takerole: {e}"); await interaction.followup.send(f"⚙️ 移除時出錯: {e}", ephemeral=True)
 
+# --- Slash Command: Create Separator Role ---
 @bot.tree.command(name="createseparator", description="創建一個視覺分隔線身份組。")
 @app_commands.describe(label="要在分隔線中顯示的文字 (例如 '身分', '通知')。")
 @app_commands.checks.has_permissions(manage_roles=True)
@@ -376,6 +383,7 @@ async def slash_createseparator(interaction: discord.Interaction, label: str):
     try: new_role = await guild.create_role(name=separator_name, permissions=discord.Permissions.none(), color=discord.Color.light_grey(), hoist=False, mentionable=False, reason=f"Separator by {interaction.user}"); await interaction.followup.send(f"✅ 已創建分隔線: **{new_role.name}**\n**重要:** 請去 **伺服器設定 -> 身份組** 手動拖動位置！",ephemeral=False)
     except Exception as e: print(f"Err /createseparator: {e}"); await interaction.followup.send(f"⚙️ 創建分隔線時出錯: {e}", ephemeral=True)
 
+# --- Slash Command: Clear Messages ---
 @bot.tree.command(name="clear", description="刪除此頻道中指定數量的訊息 (1-100)。")
 @app_commands.describe(amount="要刪除的訊息數量。")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -387,6 +395,7 @@ async def slash_clear(interaction: discord.Interaction, amount: app_commands.Ran
     try: deleted = await channel.purge(limit=amount); await interaction.followup.send(f"✅ 已刪除 {len(deleted)} 則訊息。", ephemeral=True)
     except Exception as e: print(f"Err /clear: {e}"); await interaction.followup.send(f"⚙️ 刪除時出錯: {e}", ephemeral=True)
 
+# --- Slash Command: Manually Warn User ---
 @bot.tree.command(name="warn", description="手動向用戶發出一次警告。")
 @app_commands.describe(user="要警告的用戶。", reason="警告的原因 (可選)。")
 @app_commands.checks.has_permissions(kick_members=True)
@@ -419,6 +428,7 @@ async def slash_warn(interaction: discord.Interaction, user: discord.Member, rea
     else: embed.title = "⚠️ 手動警告已發出 ⚠️"; embed.add_field(name="後續", value=f"達到 {KICK_THRESHOLD} 次警告將被踢出。", inline=False)
     await interaction.followup.send(embed=embed)
 
+# --- Slash Command: Remove Warning ---
 @bot.tree.command(name="unwarn", description="移除用戶的一次警告。")
 @app_commands.describe(user="要移除其警告的用戶。", reason="移除警告的原因 (可選)。")
 @app_commands.checks.has_permissions(kick_members=True)
@@ -434,6 +444,7 @@ async def slash_unwarn(interaction: discord.Interaction, user: discord.Member, r
     embed.add_field(name="用戶", value=user.mention, inline=False); embed.add_field(name="移除原因", value=reason, inline=False); embed.add_field(name="新的警告次數", value=f"{new_warning_count}/{KICK_THRESHOLD}", inline=False); embed.timestamp = discord.utils.utcnow()
     await interaction.response.send_message(embed=embed)
 
+# --- Slash Command: Announce ---
 @bot.tree.command(name="announce", description="發送帶有精美嵌入格式的公告。")
 @app_commands.describe( channel="要發送公告的頻道。", title="公告的標題。", message="公告的主要內容 (使用 '\\n' 換行)。", ping_role="(可選) 要在公告前提及的身份組。", image_url="(可選) 要在公告中包含的圖片 URL。", color="(可選) 嵌入框的十六進制顏色碼 (例如 '#3498db').")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -460,7 +471,6 @@ async def slash_announce(interaction: discord.Interaction, channel: discord.Text
         if not validation_warning: await interaction.followup.send(f"✅ 公告已發送到 {channel.mention}!", ephemeral=True)
         else: print(f"公告已發送至 {channel.mention} by {author} 但有驗證警告。")
     except Exception as e: print(f"Err /announce: {e}"); await interaction.followup.send(f"⚙️ 發送時出錯: {e}", ephemeral=True)
-
 
 # --- Management Command Group Definitions ---
 manage_group = app_commands.Group(name="管理", description="伺服器管理相關指令 (限管理員)")
@@ -543,14 +553,37 @@ async def manage_mute(interaction: discord.Interaction, user: discord.Member, du
 @app_commands.checks.bot_has_permissions(kick_members=True)
 async def manage_kick(interaction: discord.Interaction, user: discord.Member, reason: str = "未指定原因"):
     await interaction.response.defer(ephemeral=True);
+    # --- CORRECTED KICK LOGIC ---
     guild = interaction.guild; author = interaction.user
     if user == author: await interaction.followup.send("不能踢出自己。", ephemeral=True); return
     if isinstance(author, discord.Member) and user.top_role >= author.top_role and author != guild.owner: await interaction.followup.send("無法踢出更高層級用戶。", ephemeral=True); return
     if user == guild.owner: await interaction.followup.send("不能踢出擁有者。", ephemeral=True); return
     if user == guild.me: await interaction.followup.send("不能踢出我自己。", ephemeral=True); return
     if user.top_role >= guild.me.top_role and guild.me != guild.owner: await interaction.followup.send("❌ Bot無法踢出更高層級用戶。", ephemeral=True); return
-    try: dm_reason = f"你已被踢出伺服器 **{guild.name}**。原因: {reason}"; try: await user.send(dm_reason); except Exception: pass; await user.kick(reason=f"Kicked by {author}: {reason}"); await interaction.followup.send(f"👢 {user.mention} (`{user}`) 已被踢出。原因: {reason}", ephemeral=False)
-    except Exception as e: print(f"Err /管理 踢出: {e}"); await interaction.followup.send(f"⚙️ 踢出操作失敗: {e}", ephemeral=True)
+    try:
+        dm_reason = f"你已被踢出伺服器 **{guild.name}**。原因: {reason}"
+        try:
+            await user.send(dm_reason)
+            print(f"   Sent kick DM to {user.name}.")
+        except discord.Forbidden:
+             print(f"   Could not send kick DM to {user.name} (Forbidden).")
+        except Exception as dm_err:
+             print(f"   Error sending kick DM to {user.name}: {dm_err}")
+
+        await user.kick(reason=f"Kicked by {author}: {reason}")
+        print(f"   Kicked {user.name}.")
+
+        await interaction.followup.send(f"👢 {user.mention} (`{user}`) 已被踢出伺服器。原因: {reason}", ephemeral=False)
+    except discord.Forbidden:
+        print(f"Err /管理 踢出: Bot lacks permission/hierarchy to kick {user.name}.")
+        await interaction.followup.send(f"⚙️ 踢出操作失敗：機器人權限不足或層級不夠。", ephemeral=True)
+    except discord.HTTPException as http_err:
+        print(f"Err /管理 踢出 (HTTP): {http_err}")
+        await interaction.followup.send(f"⚙️ 踢出操作時發生網路錯誤: {http_err}", ephemeral=True)
+    except Exception as e:
+        print(f"Err /管理 踢出: {e}")
+        await interaction.followup.send(f"⚙️ 踢出操作失敗: {e}", ephemeral=True)
+    # --- END OF CORRECTED KICK LOGIC ---
 
 @manage_group.command(name="封禁", description="將成員永久封禁 (需封禁成員權限)")
 @app_commands.describe(user_id="要封禁的用戶ID (防止誤封)", reason="原因(可選)")
@@ -693,7 +726,6 @@ async def voice_claim(interaction: discord.Interaction):
         await interaction.followup.send(f"✅ 你已獲取頻道 {user_vc.mention} 的房主權限！", ephemeral=False)
         print(f"[TempVC] Ownership {user_vc.id} claimed by {user.id} (Old: {current_owner_id})")
     except Exception as e: print(f"Err /語音 房主: {e}"); await interaction.followup.send(f"⚙️ 獲取房主時出錯: {e}", ephemeral=True)
-
 
 # --- Add the command groups to the bot tree ---
 bot.tree.add_command(manage_group)
