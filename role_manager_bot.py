@@ -1,4 +1,4 @@
-# slash_role_manager_bot.py (FINAL COMPLETE CODE v6 - Includes all functions and corrections)
+# slash_role_manager_bot.py (FINAL COMPLETE CODE v8 - Includes all functions and ALL corrections)
 
 import discord
 from discord import app_commands
@@ -38,13 +38,13 @@ BOT_SPAM_TIME_WINDOW_SECONDS = 3
 
 # !!! 重要：替换成你的管理员/Mod身份组ID列表 !!!
 MOD_ALERT_ROLE_IDS = [
-    1362713317222912140, # <--- 替换!
-    1362713953960198216  # <--- 替换!
+    1362713317222912140, # <--- 替换! Example ID
+    1362713953960198216  # <--- 替换! Example ID
 ]
 
 # --- Public Warning Log Channel Config ---
 # !!! 重要：替换成你的警告/消除警告公开通知频道ID !!!
-PUBLIC_WARN_LOG_CHANNEL_ID = 123456789012345682 # <--- 替换!
+PUBLIC_WARN_LOG_CHANNEL_ID = 123456789012345682 # <--- 替换! Example ID
 
 # --- Bad Word Detection Config & Storage (In-Memory) ---
 # !!! 【警告】仔细审查并【大幅删减】此列表，避免误判 !!!
@@ -152,10 +152,10 @@ async def on_member_join(member: discord.Member):
     if roles_failed: print(f"‼️ Could not assign for {member.name}: {', '.join(roles_failed)}")
     # --- (Optional) Send Welcome Message ---
     # !!! IMPORTANT: Replace channel IDs below !!!
-    welcome_channel_id = 123456789012345678      # <--- 替换!
-    rules_channel_id = 123456789012345679        # <--- 替换!
-    roles_info_channel_id = 123456789012345680   # <--- 替换!
-    verification_channel_id = 123456789012345681 # <--- 替换!
+    welcome_channel_id = 123456789012345678      # <--- 替换! Example ID
+    rules_channel_id = 123456789012345679        # <--- 替换! Example ID
+    roles_info_channel_id = 123456789012345680   # <--- 替换! Example ID
+    verification_channel_id = 123456789012345681 # <--- 替换! Example ID
     welcome_channel = guild.get_channel(welcome_channel_id)
     if welcome_channel and isinstance(welcome_channel, discord.TextChannel):
         try:
@@ -179,7 +179,7 @@ async def on_message(message: discord.Message):
     # --- 1. Bad Word Detection ---
     content_lower = message.content.lower()
     triggered_bad_word = None
-    for word in BAD_WORDS_LOWER:
+    for word in BAD_WORDS_LOWER: # Use the lowercase list
         if word in content_lower: triggered_bad_word = word; break
     if triggered_bad_word:
         print(f"🚫 Bad Word: '{triggered_bad_word}' by {message.author} in #{message.channel.name}")
@@ -188,7 +188,8 @@ async def on_message(message: discord.Message):
         if triggered_bad_word not in user_offenses: # First offense
             user_offenses.add(triggered_bad_word); print(f"   First offense reminder.")
             try:
-                rules_ch_mention = f"<#{rules_channel_id}>" if 'rules_channel_id' in locals() and rules_channel_id != 123456789012345679 else "#規則" # Use variable if defined in scope
+                rules_ch_id = 123456789012345679 # !!! REPLACE rules_channel_id AGAIN HERE or get from settings !!!
+                rules_ch_mention = f"<#{rules_ch_id}>" if rules_ch_id != 123456789012345679 else "#規則" # Use actual rules channel ID
                 reminder_msg = (f"{message.author.mention}，请注意言辞，参考 {rules_ch_mention}。本次提醒。")
                 await message.channel.send(reminder_msg, delete_after=20)
             except Exception as remind_err: print(f"   Error sending reminder: {remind_err}")
@@ -209,16 +210,9 @@ async def on_message(message: discord.Message):
                 else: print(f"   Cannot get Member for kick."); warn_embed.add_field(name="踢出状态", value="失败 (无法获取成员)", inline=False)
             else: warn_embed.title = "⚠️ 自动警告已发出 (不当言语) ⚠️"
             await send_to_public_log(message.guild, warn_embed) # Send to public log
-            # --- CORRECTED SYNTAX IS HERE ---
             if not kick_performed:
-                try: # <<< try on new line
-                    await message.channel.send(f"{message.author.mention}，你的言论触发自动警告。({warning_count}/{KICK_THRESHOLD})", delete_after=20)
-                except Exception as e: # <<< except indented
-                    print(f"   Error sending bad word repeat offense notice: {e}")
-                    pass # Ignore if sending fails
-            # --- END OF CORRECTION ---
-            # Optionally delete the offensive message
-            # ...
+                try: await message.channel.send(f"{message.author.mention}，你的言论触发自动警告。({warning_count}/{KICK_THRESHOLD})", delete_after=20)
+                except Exception as e: print(f"   Error sending bad word repeat offense notice: {e}")
             return # Stop processing
 
     # --- 2. Bot Spam Detection Logic ---
@@ -228,7 +222,7 @@ async def on_message(message: discord.Message):
         time_limit_bot = now - datetime.timedelta(seconds=BOT_SPAM_TIME_WINDOW_SECONDS)
         bot_message_timestamps[bot_author_id] = [ts for ts in bot_message_timestamps[bot_author_id] if ts > time_limit_bot]
         if len(bot_message_timestamps[bot_author_id]) >= BOT_SPAM_COUNT_THRESHOLD:
-            print(f"🚨 BOT Spam: {message.author} in #{message.channel.name}")
+            print(f"🚨 BOT Spam Detected: {message.author} in #{message.channel.name}")
             bot_message_timestamps[bot_author_id] = []
             mod_mentions = " ".join([f"<@&{role_id}>" for role_id in MOD_ALERT_ROLE_IDS])
             action_summary = "未尝试自动操作。"
@@ -239,39 +233,36 @@ async def on_message(message: discord.Message):
                 if my_bot_member.guild_permissions.kick_members:
                     if my_bot_member.top_role > spamming_bot_member.top_role:
                         kick_attempted_or_failed = True
-                        # --- CORRECTED SYNTAX IS HERE ---
-                        try: # <<< try on new line
+                        try: # Corrected kick try block
                             await spamming_bot_member.kick(reason="Auto Kick: Bot spam detected.")
                             action_summary = "**➡️ 自动操作：已尝试踢出该机器人 (成功)。**"
                             print(f"   Kicked bot {spamming_bot_member.name}.")
-                        except discord.Forbidden: # <<< except indented
+                        except discord.Forbidden:
                             action_summary = "**➡️ 自动操作：尝试踢出失败 (权限/层级问题)。**"
                             print(f"   Kick failed (Forbidden/Hierarchy) for bot {spamming_bot_member.name}.")
-                            kick_attempted_or_failed = False # Mark as failed
-                        except Exception as kick_err: # <<< except indented
+                            kick_attempted_or_failed = False
+                        except Exception as kick_err:
                             action_summary = f"**➡️ 自动操作：尝试踢出时发生错误: {kick_err}**"
                             print(f"   Error during kick attempt for bot {spamming_bot_member.name}: {kick_err}")
-                            kick_attempted_or_failed = False # Mark as failed
-                        # --- END OF CORRECTION ---
+                            kick_attempted_or_failed = False
                     else: action_summary = "**➡️ 自动操作：无法踢出 (目标机器人层级更高)。**"; print(f"   Cannot kick bot {spamming_bot_member.name} (Hierarchy)."); kick_attempted_or_failed = True
                 else: action_summary = "**➡️ 自动操作：机器人缺少“踢出成员”权限，无法尝试踢出。**"; print("   Bot lacks Kick Members permission."); kick_attempted_or_failed = True
 
                 roles_removed_message = ""
-                # --- CORRECTED SYNTAX IS HERE ---
                 if not ("成功" in action_summary and kick_attempted_or_failed) and my_bot_member.guild_permissions.manage_roles:
                     roles_to_try_removing = [r for r in spamming_bot_member.roles if r != message.guild.default_role and r < my_bot_member.top_role]
                     if roles_to_try_removing:
                         print(f"   Attempting role removal for {spamming_bot_member.name}: {[r.name for r in roles_to_try_removing]}")
-                        try: # <<< try on new line
+                        try: # Corrected role removal try block
                             await spamming_bot_member.remove_roles(*roles_to_try_removing, reason="自动移除：检测到刷屏")
                             if not kick_attempted_or_failed: action_summary = "**➡️ 自动操作：已尝试移除该机器人的身份组。**"
                             else: action_summary += "\n**➡️ 自动操作：另外，已尝试移除该机器人的身份组。**"
                             print(f"   Attempted to remove roles from bot {spamming_bot_member.name}.")
-                        except discord.Forbidden: # <<< except indented
+                        except discord.Forbidden:
                              if not kick_attempted_or_failed: action_summary = "**➡️ 自动操作：尝试移除身份组失败 (权限/层级问题)。**"
                              else: action_summary += "\n**➡️ 自动操作：尝试移除身份组也失败 (权限/层级问题)。**"
                              print(f"   Remove roles failed (Forbidden/Hierarchy) for bot {spamming_bot_member.name}.")
-                        except Exception as role_err: # <<< except indented
+                        except Exception as role_err:
                              if not kick_attempted_or_failed: action_summary = f"**➡️ 自动操作：尝试移除身份组时出错: {role_err}**"
                              else: action_summary += f"\n**➡️ 自动操作：尝试移除身份组也出错: {role_err}**"
                              print(f"   Error removing roles for bot {spamming_bot_member.name}: {role_err}")
@@ -281,38 +272,36 @@ async def on_message(message: discord.Message):
                 elif not kick_attempted_or_failed and not my_bot_member.guild_permissions.manage_roles:
                      if not kick_attempted_or_failed: action_summary = "**➡️ 自动操作：机器人也缺少“管理身份组”权限。**"; print("   Bot lacks Manage Roles.")
                 action_summary += roles_removed_message
-                # --- END OF CORRECTION ---
-            else: action_summary = "**➡️ Auto: Cannot find bot member object.**"; print(f"   Could not find Member for bot {bot_author_id}.") # Corrected log
+            else: action_summary = "**➡️ Auto: Cannot find bot member object.**"; print(f"   Could not find Member for bot {bot_author_id}.")
 
-            final_alert = ( f"🚨 **机器人刷屏!** 🚨\nBot: {message.author.mention}\nChannel: {message.channel.mention}\n{action_summary}\n{mod_mentions} 请管理员关注!" ) # Corrected alert
+            final_alert = ( f"🚨 **机器人刷屏!** 🚨\nBot: {message.author.mention}\nChannel: {message.channel.mention}\n{action_summary}\n{mod_mentions} 请管理员关注!" )
             try: await message.channel.send(final_alert); print(f"   Sent bot spam alert.")
             except Exception as alert_err: print(f"   Error sending bot spam alert: {alert_err}")
-            deleted_count = 0 # Delete logic...
+            deleted_count = 0
             if message.channel.permissions_for(message.guild.me).manage_messages:
                 print(f"   Attempting delete...")
-                # --- CORRECTED SYNTAX WAS HERE ---
-                try: # <<< try on new line
+                # --- CORRECTED SYNTAX IS HERE ---
+                try: # <<< try for history/delete loop
                     async for msg in message.channel.history(limit=BOT_SPAM_COUNT_THRESHOLD*2, after=now-datetime.timedelta(seconds=BOT_SPAM_TIME_WINDOW_SECONDS+5)):
                         if msg.author.id == bot_author_id:
-                            try: # <<< Inner try on new line
+                            try: # <<< Inner try for single delete
                                 await msg.delete()
                                 deleted_count += 1
-                            except Exception: # <<< except indented
-                                pass # Ignore single deletion errors
+                            except Exception: # <<< except for single delete
+                                pass
                     print(f"   Deleted {deleted_count} messages from spamming bot {message.author.name}.")
                     if deleted_count > 0:
                         try: # <<< try for sending confirmation
                            await message.channel.send(f"🧹 已自動清理 {deleted_count} 則來自 {message.author.mention} 的刷屏訊息。", delete_after=15)
-                        except Exception as send_err: # <<< except indented
+                        except Exception as send_err: # <<< except for sending confirmation
                            print(f"   Error sending cleanup confirmation: {send_err}")
-                except Exception as del_err: # <<< except for history indented
+                except Exception as del_err: # <<< except for history/delete loop
                     print(f"   Error during bot message deletion process: {del_err}")
                 # --- END OF CORRECTION ---
             else: print("   Bot lacks Manage Msgs perm.")
         return # Stop processing for bots
 
     # --- 3. User Spam Detection Logic ---
-    # (User spam detection logic remains the same)
     user_message_timestamps.setdefault(author_id, []); user_warnings.setdefault(author_id, 0)
     user_message_timestamps[author_id].append(now)
     time_limit_user = now - datetime.timedelta(seconds=SPAM_TIME_WINDOW_SECONDS)
@@ -321,29 +310,25 @@ async def on_message(message: discord.Message):
         print(f"🚨 User Spam: {message.author} in #{message.channel.name}")
         user_warnings[author_id] += 1; warning_count = user_warnings[author_id]
         print(f"   User warnings: {warning_count}/{KICK_THRESHOLD}")
-        user_message_timestamps[author_id] = []
+        user_message_timestamps[author_id] = [] # Reset user timestamps
+        log_embed_user = discord.Embed(color=discord.Color.orange(), timestamp=now); log_embed_user.set_author(name=f"自动警告 (用户刷屏)", icon_url=bot.user.display_avatar.url); log_embed_user.add_field(name="用户", value=f"{author.mention} ({author_id})", inline=False); log_embed_user.add_field(name="频道", value=message.channel.mention, inline=True); log_embed_user.add_field(name="警告次数", value=f"{warning_count}/{KICK_THRESHOLD}", inline=True); log_embed_user.add_field(name="消息链接", value=f"[点击跳转]({message.jump_url})", inline=False)
+        kick_performed = False
         if warning_count >= KICK_THRESHOLD:
-            print(f"   Kick threshold for {message.author}.")
+            log_embed_user.title = "🚨 自动踢出 (用户刷屏警告上限) 🚨"; log_embed_user.color = discord.Color.red(); log_embed_user.add_field(name="处 置", value="用户已被踢出", inline=False); print(f"   Kick threshold: {author}")
             if member: # Kick logic...
-                bot_member = message.guild.me; kick_reason = f"自動踢出：刷屏警告達到 {KICK_THRESHOLD} 次。"
+                bot_member = message.guild.me; kick_reason = f"自动踢出：刷屏警告达到 {KICK_THRESHOLD} 次。";
                 if bot_member.guild_permissions.kick_members and (bot_member.top_role > member.top_role or bot_member == message.guild.owner):
-                    try:
-                        try: await member.send(f"你已被踢出伺服器 **{message.guild.name}**。\n原因：**{kick_reason}**")
-                        except Exception: pass
-                        await member.kick(reason=kick_reason)
-                        print(f"   Kicked {member.name}."); await message.channel.send(f"👢 {member.mention} 已被自動踢出，原因：刷屏警告次數過多。")
-                        user_warnings[author_id] = 0 # Reset
-                    except Exception as kick_err: print(f"   Kick Err: {kick_err}"); await message.channel.send(f"⚙️ 踢出 {member.mention} 時發生錯誤。")
-                else: print(f"   Bot lacks kick perms/hierarchy for {member.name}."); await message.channel.send(f"⚠️ 無法踢出 {member.mention} (權限/層級不足)。")
-            else: print(f"   Cannot get member object to kick {author_id}")
-        else: # Send warning
-            try: await message.channel.send(f"⚠️ {message.author.mention}，請減緩發言！({warning_count}/{KICK_THRESHOLD} 警告)", delete_after=15)
-            except Exception as warn_err: print(f"   Error sending warning: {warn_err}")
+                    try: await member.kick(reason=kick_reason); print(f"   Kicked {member.name}."); kick_performed = True; user_warnings[author_id] = 0; log_embed_user.add_field(name="踢出状态", value="成功", inline=False);
+                    except Exception as kick_err: print(f"   Kick Err: {kick_err}"); log_embed_user.add_field(name="踢出状态", value=f"失败 ({kick_err})", inline=False)
+                else: print(f"   Bot lacks kick perms/hierarchy."); log_embed_user.add_field(name="踢出状态", value="失败 (权限/层级不足)", inline=False)
+            else: print(f"   Cannot get Member for kick."); log_embed_user.add_field(name="踢出状态", value="失败 (无法获取成员)", inline=False)
+        else: log_embed_user.title = "⚠️ 自动警告 (用户刷屏) ⚠️"
+        await send_to_public_log(guild, log_embed_user, log_type="Auto Warn (User Spam)") # Send log
+        if not kick_performed: try: await message.channel.send(f"⚠️ {author.mention}，请减缓发言！({warning_count}/{KICK_THRESHOLD} 警告)", delete_after=15); except Exception as warn_err: print(f"   Error sending warning: {warn_err}")
 
 # --- Event: Voice State Update (For Temporary VCs) ---
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    # (Full temp VC logic with corrected claim syntax)
     guild = member.guild; master_vc_id = get_setting(guild.id, "master_channel_id"); category_id = get_setting(guild.id, "category_id")
     if not master_vc_id: return
     master_channel = guild.get_channel(master_vc_id)
@@ -706,6 +691,7 @@ async def manage_member_count_channel(interaction: discord.Interaction, channel_
             await interaction.followup.send(f"✅ 已創建頻道 {new_channel.mention}。", ephemeral=True)
         except Exception as e: print(f"Err create count: {e}"); await interaction.followup.send(f"⚙️ 創建時出錯: {e}", ephemeral=True)
 
+
 # --- Temporary Voice Channel Command Group ---
 voice_group = app_commands.Group(name="語音", description="臨時語音頻道相關指令")
 
@@ -779,10 +765,8 @@ async def voice_claim(interaction: discord.Interaction):
         if current_owner_id: # Reset old owner perms if they exist
              old_owner = interaction.guild.get_member(current_owner_id)
              if old_owner:
-                  # --- CORRECTED SYNTAX HERE ---
                   try: await user_vc.set_permissions(old_owner, overwrite=None, reason="原房主權限重設")
-                  except Exception as e: print(f"Could not reset perms for old owner {current_owner_id}: {e}") # Non-critical
-                  # --- END OF CORRECTION ---
+                  except Exception as e: print(f"Could not reset perms for old owner {current_owner_id}: {e}")
         temp_vc_owners[user_vc.id] = user.id
         await interaction.followup.send(f"✅ 你已獲取頻道 {user_vc.mention} 的房主權限！", ephemeral=False)
         print(f"[TempVC] Ownership {user_vc.id} claimed by {user.id} (Old: {current_owner_id})")
