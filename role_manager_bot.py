@@ -152,10 +152,10 @@ async def on_member_join(member: discord.Member):
     if roles_failed: print(f"‼️ Could not assign for {member.name}: {', '.join(roles_failed)}")
     # --- (Optional) Send Welcome Message ---
     # !!! IMPORTANT: Replace channel IDs below !!!
-    welcome_channel_id = 123456789012345678      # <--- 替换! Example ID
-    rules_channel_id = 123456789012345679        # <--- 替换! Example ID
-    roles_info_channel_id = 123456789012345680   # <--- 替换! Example ID
-    verification_channel_id = 123456789012345681 # <--- 替换! Example ID
+    welcome_channel_id = 1280014596765126669      # <--- 替换! Example ID
+    rules_channel_id = 1280026139326283799        # <--- 替换! Example ID
+    roles_info_channel_id = 1362718781498986497   # <--- 替换! Example ID
+    verification_channel_id = 1352886274691956756 # <--- 替换! Example ID
     welcome_channel = guild.get_channel(welcome_channel_id)
     if welcome_channel and isinstance(welcome_channel, discord.TextChannel):
         try:
