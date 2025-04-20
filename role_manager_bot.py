@@ -1,4 +1,4 @@
-# slash_role_manager_bot.py (FINAL COMPLETE CODE - Includes all features and ALL corrections v4)
+# slash_role_manager_bot.py (FINAL COMPLETE CODE v6 - Includes all functions and corrections)
 
 import discord
 from discord import app_commands
@@ -49,11 +49,9 @@ PUBLIC_WARN_LOG_CHANNEL_ID = 123456789012345682 # <--- 替换!
 # --- Bad Word Detection Config & Storage (In-Memory) ---
 # !!! 【警告】仔细审查并【大幅删减】此列表，避免误判 !!!
 BAD_WORDS = [
-    # 1. 极其严重的粗口/人身攻击/威胁 (相对明确)
     "操你妈", "草泥马", "cnm", "日你妈", "rnm", "屌你老母", "屌你媽", "死妈", "死媽", "nmsl", "死全家", "死全家",
     "杂种", "雜種", "畜生", "畜牲", "狗娘养的", "狗娘養的", "贱人", "賤人", "婊子", "bitch", "傻逼", "煞笔", "sb", "脑残", "腦殘",
     "智障", "弱智", "低能", "白痴", "白癡", "废物", "廢物", "垃圾", "lj", "kys", "去死", "自杀", "自殺", "杀你", "殺你",
-    # 2. 常见的粗口/脏话 (误判风险增大!)
     "他妈的", "他媽的", "tmd", "妈的", "媽的", "卧槽", "我肏", "我操", "我草", "靠北", "靠杯", "干你娘", "干您娘",
     "fuck", "shit", "cunt", "asshole", "鸡巴", "雞巴", "jb",
 ]
@@ -91,7 +89,7 @@ async def send_to_public_log(guild: discord.Guild, embed: discord.Embed):
             try: await log_channel.send(embed=embed); print(f"   Sent public log to channel {log_channel_id_for_public}"); return True
             except Exception as log_e: print(f"   Error sending public log: {log_e}")
         else: print(f"   Error: Bot lacks Send/Embed permission in public log channel {log_channel_id_for_public}.")
-    elif log_channel_id_for_public != 123456789012345682: # Only warn if ID was changed
+    elif log_channel_id_for_public != 123456789012345682:
          print(f"⚠️ Public warn log channel {log_channel_id_for_public} not found in guild {guild.id}.")
     return False
 
@@ -139,7 +137,7 @@ bot.tree.on_error = on_app_command_error
 async def on_member_join(member: discord.Member):
     guild = member.guild
     print(f'[+] {member.name} ({member.id}) 加入 {guild.name}')
-    # !!! IMPORTANT: Replace role names below with your exact separator role names !!!
+    # !!! IMPORTANT: Replace role names below !!!
     separator_role_names_to_assign = ["▲─────身分─────", "▲─────通知─────", "▲─────其他─────"] # <--- 替换!
     roles_to_add = []; roles_failed = []
     for role_name in separator_role_names_to_assign:
@@ -161,10 +159,9 @@ async def on_member_join(member: discord.Member):
     welcome_channel = guild.get_channel(welcome_channel_id)
     if welcome_channel and isinstance(welcome_channel, discord.TextChannel):
         try:
-            embed = discord.Embed(title=f"🎉 歡迎來到 {guild.name}! 🎉", description=f"你好 {member.mention}! ...", color=discord.Color.blue()) # Shortened
-            # ...(Rest of welcome embed setup)...
-            # await welcome_channel.send(embed=embed); print(f"Sent welcome for {member.name}.")
-            pass # Add welcome embed logic here if needed
+            embed = discord.Embed(title=f"🎉 歡迎來到 {guild.name}! 🎉", description=f"你好 {member.mention}! 很高興你能加入 **GJ Team**！\n\n👇 **開始之前:**\n- 阅读服务器规则: <#{rules_channel_id}>\n- 了解身份组信息: <#{roles_info_channel_id}>\n- 认证你的TSB实力: <#{verification_channel_id}>\n\n祝你在 GJ Team 玩得愉快!", color=discord.Color.blue())
+            embed.set_thumbnail(url=member.display_avatar.url); embed.set_footer(text=f"你是伺服器的第 {guild.member_count} 位成員！")
+            await welcome_channel.send(embed=embed); print(f"Sent welcome for {member.name}.")
         except Exception as e: print(f"❌ Error sending welcome: {e}")
     elif welcome_channel_id != 123456789012345678: print(f"⚠️ Welcome channel {welcome_channel_id} not found.")
 
@@ -190,7 +187,10 @@ async def on_message(message: discord.Message):
         user_offenses = guild_offenses.setdefault(author_id, set())
         if triggered_bad_word not in user_offenses: # First offense
             user_offenses.add(triggered_bad_word); print(f"   First offense reminder.")
-            try: rules_ch_mention = f"<#{rules_channel_id}>" if 'rules_channel_id' in locals() and rules_channel_id != 123456789012345679 else "#規則"; await message.channel.send(f"{message.author.mention}，请注意言辞，参考 {rules_ch_mention}。本次提醒。", delete_after=20)
+            try:
+                rules_ch_mention = f"<#{rules_channel_id}>" if 'rules_channel_id' in locals() and rules_channel_id != 123456789012345679 else "#規則" # Use variable if defined in scope
+                reminder_msg = (f"{message.author.mention}，请注意言辞，参考 {rules_ch_mention}。本次提醒。")
+                await message.channel.send(reminder_msg, delete_after=20)
             except Exception as remind_err: print(f"   Error sending reminder: {remind_err}")
             return # Stop processing
         else: # Repeat offense -> Warn
@@ -209,7 +209,7 @@ async def on_message(message: discord.Message):
                 else: print(f"   Cannot get Member for kick."); warn_embed.add_field(name="踢出状态", value="失败 (无法获取成员)", inline=False)
             else: warn_embed.title = "⚠️ 自动警告已发出 (不当言语) ⚠️"
             await send_to_public_log(message.guild, warn_embed) # Send to public log
-            # --- CORRECTED SYNTAX WAS HERE ---
+            # --- CORRECTED SYNTAX IS HERE ---
             if not kick_performed:
                 try: # <<< try on new line
                     await message.channel.send(f"{message.author.mention}，你的言论触发自动警告。({warning_count}/{KICK_THRESHOLD})", delete_after=20)
@@ -218,13 +218,11 @@ async def on_message(message: discord.Message):
                     pass # Ignore if sending fails
             # --- END OF CORRECTION ---
             # Optionally delete the offensive message
-            # if message.channel.permissions_for(message.guild.me).manage_messages:
-            #    try: await message.delete()
-            #    except: pass
+            # ...
             return # Stop processing
 
     # --- 2. Bot Spam Detection Logic ---
-    if message.author.bot: # This check is redundant as it's handled above, but safe
+    if message.author.bot:
         bot_author_id = message.author.id; bot_message_timestamps.setdefault(bot_author_id, [])
         bot_message_timestamps[bot_author_id].append(now)
         time_limit_bot = now - datetime.timedelta(seconds=BOT_SPAM_TIME_WINDOW_SECONDS)
@@ -241,7 +239,7 @@ async def on_message(message: discord.Message):
                 if my_bot_member.guild_permissions.kick_members:
                     if my_bot_member.top_role > spamming_bot_member.top_role:
                         kick_attempted_or_failed = True
-                        # --- CORRECTED SYNTAX WAS HERE ---
+                        # --- CORRECTED SYNTAX IS HERE ---
                         try: # <<< try on new line
                             await spamming_bot_member.kick(reason="Auto Kick: Bot spam detected.")
                             action_summary = "**➡️ 自动操作：已尝试踢出该机器人 (成功)。**"
@@ -259,7 +257,7 @@ async def on_message(message: discord.Message):
                 else: action_summary = "**➡️ 自动操作：机器人缺少“踢出成员”权限，无法尝试踢出。**"; print("   Bot lacks Kick Members permission."); kick_attempted_or_failed = True
 
                 roles_removed_message = ""
-                # --- CORRECTED SYNTAX WAS HERE ---
+                # --- CORRECTED SYNTAX IS HERE ---
                 if not ("成功" in action_summary and kick_attempted_or_failed) and my_bot_member.guild_permissions.manage_roles:
                     roles_to_try_removing = [r for r in spamming_bot_member.roles if r != message.guild.default_role and r < my_bot_member.top_role]
                     if roles_to_try_removing:
@@ -284,13 +282,14 @@ async def on_message(message: discord.Message):
                      if not kick_attempted_or_failed: action_summary = "**➡️ 自动操作：机器人也缺少“管理身份组”权限。**"; print("   Bot lacks Manage Roles.")
                 action_summary += roles_removed_message
                 # --- END OF CORRECTION ---
-            else: action_summary = "**➡️ Auto: Cannot find bot member object.**"; print(f"   Could not find Member for bot {bot_author_id}.")
+            else: action_summary = "**➡️ Auto: Cannot find bot member object.**"; print(f"   Could not find Member for bot {bot_author_id}.") # Corrected log
 
-            final_alert = ( f"🚨 **机器人刷屏!** 🚨\nBot: {message.author.mention}\nChannel: {message.channel.mention}\n{action_summary}\n{mod_mentions} 请管理员关注!" )
+            final_alert = ( f"🚨 **机器人刷屏!** 🚨\nBot: {message.author.mention}\nChannel: {message.channel.mention}\n{action_summary}\n{mod_mentions} 请管理员关注!" ) # Corrected alert
             try: await message.channel.send(final_alert); print(f"   Sent bot spam alert.")
             except Exception as alert_err: print(f"   Error sending bot spam alert: {alert_err}")
             deleted_count = 0 # Delete logic...
-            if message.channel.permissions_for(message.guild.me).manage_messages: print(f"   Attempting delete...");
+            if message.channel.permissions_for(message.guild.me).manage_messages:
+                print(f"   Attempting delete...")
                 # --- CORRECTED SYNTAX WAS HERE ---
                 try: # <<< try on new line
                     async for msg in message.channel.history(limit=BOT_SPAM_COUNT_THRESHOLD*2, after=now-datetime.timedelta(seconds=BOT_SPAM_TIME_WINDOW_SECONDS+5)):
@@ -366,12 +365,24 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         channel_to_check = guild.get_channel(before.channel.id)
         if channel_to_check and isinstance(channel_to_check, discord.VoiceChannel):
             if not any(m for m in channel_to_check.members if not m.bot):
-                print(f"   {channel_to_check.name} empty. Deleting..."); try: await channel_to_check.delete(reason="Temp VC empty"); print(f"   Deleted.")
-                except Exception as e: print(f"   Error deleting {channel_to_check.name}: {e}")
-                finally: if channel_to_check.id in temp_vc_owners: del temp_vc_owners[channel_to_check.id]; if channel_to_check.id in temp_vc_created: temp_vc_created.remove(channel_to_check.id)
+                print(f"   {channel_to_check.name} empty. Deleting...");
+                try: # <<< try for delete
+                    await channel_to_check.delete(reason="Temp VC empty")
+                    print(f"   Deleted.")
+                except Exception as e: # <<< except for delete
+                    print(f"   Error deleting {channel_to_check.name}: {e}")
+                finally: # <<< finally indented correctly
+                     if channel_to_check.id in temp_vc_owners: del temp_vc_owners[channel_to_check.id]
+                     if channel_to_check.id in temp_vc_created: temp_vc_created.remove(channel_to_check.id)
             else: print(f"   {channel_to_check.name} still has members.")
-        else: print(f"   Channel {before.channel.id} no longer exists."); if before.channel.id in temp_vc_owners: del temp_vc_owners[before.channel.id]; if before.channel.id in temp_vc_created: temp_vc_created.remove(before.channel.id)
-
+        else:
+            print(f"   Channel {before.channel.id} no longer exists or not a VC.")
+            # --- CORRECTED SYNTAX HERE ---
+            if before.channel.id in temp_vc_owners: # <<< if on new line
+                del temp_vc_owners[before.channel.id]
+            if before.channel.id in temp_vc_created: # <<< if on new line
+                temp_vc_created.remove(before.channel.id)
+            # --- END OF CORRECTION ---
 
 # --- Slash Command Definitions ---
 @bot.tree.command(name="help", description="顯示可用指令的相關資訊。")
@@ -543,6 +554,7 @@ async def slash_announce(interaction: discord.Interaction, channel: discord.Text
         if not validation_warning: await interaction.followup.send(f"✅ 公告已發送到 {channel.mention}!", ephemeral=True)
         else: print(f"公告已發送至 {channel.mention} by {author} 但有驗證警告。")
     except Exception as e: print(f"Err /announce: {e}"); await interaction.followup.send(f"⚙️ 發送時出錯: {e}", ephemeral=True)
+
 
 # --- Management Command Group Definitions ---
 manage_group = app_commands.Group(name="管理", description="伺服器管理相關指令 (限管理員)")
@@ -778,7 +790,6 @@ async def voice_claim(interaction: discord.Interaction):
 
 
 # --- Add the command groups to the bot tree ---
-# Make sure these lines are in the global scope after defining the groups and bot
 bot.tree.add_command(manage_group)
 bot.tree.add_command(voice_group)
 
@@ -786,7 +797,6 @@ bot.tree.add_command(voice_group)
 if __name__ == "__main__":
     print("Starting bot...")
     try:
-        # This runs the bot using the token loaded from the environment variable
         bot.run(BOT_TOKEN)
     except discord.LoginFailure: print("❌ FATAL ERROR: Login failed. Invalid DISCORD_BOT_TOKEN.")
     except discord.PrivilegedIntentsRequired: print("❌ FATAL ERROR: Privileged Intents required but not enabled in Developer Portal.")
