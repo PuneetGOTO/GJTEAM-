@@ -44,7 +44,7 @@ MOD_ALERT_ROLE_IDS = [
 
 # --- Public Warning Log Channel Config ---
 # !!! 重要：替换成你的警告/消除警告公开通知频道ID !!!
-PUBLIC_WARN_LOG_CHANNEL_ID = 123456789012345682 # <--- 替换! Example ID
+PUBLIC_WARN_LOG_CHANNEL_ID = 1363523347169939578 # <--- 替换! Example ID
 
 # --- Bad Word Detection Config & Storage (In-Memory) ---
 # !!! 【警告】仔细审查并【大幅删减】此列表，避免误判 !!!
@@ -152,14 +152,14 @@ async def on_member_join(member: discord.Member):
     if roles_failed: print(f"‼️ Could not assign for {member.name}: {', '.join(roles_failed)}")
     # --- (Optional) Send Welcome Message ---
     # !!! IMPORTANT: Replace channel IDs below !!!
-    welcome_channel_id = 123456789012345678      # <--- 替换! Example ID
-    rules_channel_id = 123456789012345679        # <--- 替换! Example ID
-    roles_info_channel_id = 123456789012345680   # <--- 替换! Example ID
-    verification_channel_id = 123456789012345681 # <--- 替换! Example ID
+    welcome_channel_id = 1280014596765126669      # <--- 替换! Example ID
+    rules_channel_id = 1280026139326283799        # <--- 替换! Example ID
+    roles_info_channel_id = 1362718781498986497   # <--- 替换! Example ID
+    verification_channel_id = 1352886274691956756 # <--- 替换! Example ID
     welcome_channel = guild.get_channel(welcome_channel_id)
     if welcome_channel and isinstance(welcome_channel, discord.TextChannel):
         try:
-            embed = discord.Embed(title=f"🎉 歡迎來到 {guild.name}! 🎉", description=f"你好 {member.mention}! 很高興你能加入 **GJ Team**！\n\n👇 **開始之前:**\n- 阅读服务器规则: <#{rules_channel_id}>\n- 了解身份组信息: <#{roles_info_channel_id}>\n- 认证你的TSB实力: <#{verification_channel_id}>\n\n祝你在 GJ Team 玩得愉快!", color=discord.Color.blue())
+            embed = discord.Embed(title=f"🎉 歡迎來到 {guild.name}! 🎉", description=f"你好 {member.mention}! 很高興你能加入 **GJ Team**！\n\n👇 **開始之前:**\n- 阅读服务器规则: <#{rules_channel_id}>\n- 了解身份组信息: <#{roles_info_channel_id}>\n- 认证身份: <#{verification_channel_id}>\n\n祝你在 GJ Team 玩得愉快!", color=discord.Color.blue())
             embed.set_thumbnail(url=member.display_avatar.url); embed.set_footer(text=f"你是伺服器的第 {guild.member_count} 位成員！")
             await welcome_channel.send(embed=embed); print(f"Sent welcome for {member.name}.")
         except Exception as e: print(f"❌ Error sending welcome: {e}")
@@ -189,8 +189,8 @@ async def on_message(message: discord.Message):
             user_offenses.add(triggered_bad_word); print(f"   First offense reminder.")
             try:
                 # !!! Replace rules_channel_id used in the message !!!
-                rules_ch_id = 123456789012345679 # <--- 替换! Example ID
-                rules_ch_mention = f"<#{rules_ch_id}>" if rules_ch_id != 123456789012345679 else "#規則"
+                rules_ch_id = 1363082989369819177 # <--- 替换! Example ID
+                rules_ch_mention = f"<#{rules_ch_id}>" if rules_ch_id != 1363082989369819177 else "#規則"
                 reminder_msg = (f"{message.author.mention}，请注意言辞，参考 {rules_ch_mention}。本次提醒。")
                 await message.channel.send(reminder_msg, delete_after=20)
             except Exception as remind_err: print(f"   Error sending reminder: {remind_err}")
