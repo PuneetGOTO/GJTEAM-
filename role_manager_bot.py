@@ -44,7 +44,7 @@ MOD_ALERT_ROLE_IDS = [
 
 # --- Public Warning Log Channel Config ---
 # !!! 重要：替换成你的警告/消除警告公开通知频道ID !!!
-PUBLIC_WARN_LOG_CHANNEL_ID = 123456789012345682 # <--- 替换! Example ID
+PUBLIC_WARN_LOG_CHANNEL_ID = 1363523347169939578 # <--- 替换! Example ID
 
 # --- Bad Word Detection Config & Storage (In-Memory) ---
 # !!! 【警告】仔细审查并【大幅删减】此列表，避免误判 !!!
