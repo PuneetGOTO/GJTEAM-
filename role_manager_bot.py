@@ -630,7 +630,19 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         print(f"{member.name} left temp VC {before.channel.name}. Checking empty..."); await asyncio.sleep(1)
         channel_to_check = guild.get_channel(before.channel.id)
         if channel_to_check and isinstance(channel_to_check, discord.VoiceChannel):
-            if not any(m for m in channel_to_check.members if not m.bot): print(f"   {channel_to_check.name} empty. Deleting..."); try: await channel_to_check.delete(reason="Temp VC empty"); print(f"   Deleted."); except Exception as e: print(f"   Error deleting {channel_to_check.name}: {e}"); finally: if channel_to_check.id in temp_vc_owners: del temp_vc_owners[channel_to_check.id]; if channel_to_check.id in temp_vc_created: temp_vc_created.remove(channel_to_check.id)
+            if not any(m for m in channel_to_check.members if not m.bot): # Check if empty (ignore bots)
+                print(f"   {channel_to_check.name} empty. Deleting...")
+                try: # <<< try: 另起一行并缩进
+                    await channel_to_check.delete(reason="Temp VC empty")
+                    print(f"   Deleted.")
+                except Exception as e: # <<< except: 另起一行并缩进
+                    print(f"   Error deleting {channel_to_check.name}: {e}")
+                finally: # <<< finally: 另起一行并缩进
+                    # Cleanup storage regardless of deletion success
+                    if channel_to_check.id in temp_vc_owners: # <<< if 正确缩进
+                        del temp_vc_owners[channel_to_check.id]
+                    if channel_to_check.id in temp_vc_created: # <<< if 正确缩进
+                        temp_vc_created.remove(channel_to_check.id)
             else: print(f"   {channel_to_check.name} still has members.")
         else:
             print(f"   Channel {before.channel.id} no longer exists or not a VC.")
