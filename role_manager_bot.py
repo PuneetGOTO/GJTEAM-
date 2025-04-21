@@ -573,9 +573,33 @@ async def on_message(message: discord.Message):
         kick_performed_spam = False
         if warning_count >= KICK_THRESHOLD:
             log_embed_user.title = "🚨 自动踢出 (用户刷屏警告上限) 🚨"; log_embed_user.color = discord.Color.red(); log_embed_user.add_field(name="处 置", value="用户已被踢出", inline=False); print(f"   Kick threshold: {author}")
-            if member: bot_member = message.guild.me; kick_reason = f"自动踢出：刷屏警告达到 {KICK_THRESHOLD} 次。"; if bot_member.guild_permissions.kick_members and (bot_member.top_role > member.top_role or bot_member == message.guild.owner): try: await member.kick(reason=kick_reason); print(f"   Kicked {member.name}."); kick_performed_spam = True; user_warnings[author_id] = 0; log_embed_user.add_field(name="踢出状态", value="成功", inline=False); except Exception as kick_err: print(f"   Kick Err: {kick_err}"); log_embed_user.add_field(name="踢出状态", value=f"失败 ({kick_err})", inline=False)
-            else: print(f"   Bot lacks kick perms/hierarchy."); log_embed_user.add_field(name="踢出状态", value="失败 (权限/层级不足)", inline=False)
-            else: print(f"   Cannot get Member for kick."); log_embed_user.add_field(name="踢出状态", value="失败 (无法获取成员)", inline=False)
+            if member: # Kick logic...
+                bot_member = message.guild.me
+                kick_reason = f"自动踢出：刷屏警告达到 {KICK_THRESHOLD} 次。"
+                # Check bot permissions and hierarchy first
+                if bot_member.guild_permissions.kick_members and \
+                   (bot_member.top_role > member.top_role or bot_member == message.guild.owner):
+                    try: # <<< try: 另起一行并缩进
+                        # Try DMing user first (optional but good practice)
+                        try:
+                            await member.send(f"你因累计达到 {KICK_THRESHOLD} 次刷屏警告而被踢出伺服器 **{message.guild.name}**。")
+                        except Exception as dm_err:
+                            print(f"   Could not send kick DM (User Spam) to {member.name}: {dm_err}")
+                        # Kick the member
+                        await member.kick(reason=kick_reason)
+                        print(f"   Kicked {member.name} for user spam.")
+                        kick_performed_spam = True
+                        user_warnings[author_id] = 0 # Reset warnings on successful kick
+                        log_embed_user.add_field(name="踢出状态", value="成功", inline=False)
+                    except Exception as kick_err: # <<< except 正确缩进
+                        print(f"   Kick Err (User Spam): {kick_err}")
+                        log_embed_user.add_field(name="踢出状态", value=f"失败 ({kick_err})", inline=False)
+                else: # <<< else 与 if bot_member.guild_permissions... 对齐
+                    print(f"   Bot lacks kick perms/hierarchy for {member.name}.")
+                    log_embed_user.add_field(name="踢出状态", value="失败 (权限/层级不足)", inline=False)
+            else: # <<< else 与 if member 对齐
+                print(f"   Cannot get Member object for {author_id} to kick.")
+                log_embed_user.add_field(name="踢出状态", value="失败 (无法获取成员)", inline=False)
         else: log_embed_user.title = "⚠️ 自动警告 (用户刷屏) ⚠️"
         await send_to_public_log(guild, log_embed_user, log_type="Auto Warn (User Spam)")
         # --- CORRECTED SYNTAX IS HERE ---
