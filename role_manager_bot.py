@@ -356,7 +356,7 @@ async def on_member_join(member: discord.Member):
     guild = member.guild
     print(f'[+] {member.name} ({member.id}) 加入 {guild.name}')
     # !!! IMPORTANT: Replace role names below !!!
-    separator_role_names_to_assign = ["▲─────身分─────", "▲─────通知─────", "▲─────其他─────"] # <--- 替换!
+    separator_role_names_to_assign = ["▽─────————─────身份─────————─────", "▽─────————─────通知─────————─────", "▽─────————─────其他─────————─────"] # <--- 替换!
     roles_to_add = []; roles_failed = []
     for role_name in separator_role_names_to_assign:
         role = get(guild.roles, name=role_name)
