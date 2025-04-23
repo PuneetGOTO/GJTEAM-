@@ -81,6 +81,10 @@ temp_vc_created = set()
 user_message_timestamps = {}
 user_warnings = {}
 bot_message_timestamps = {}
+# --- AI Content Check Exemption Storage (In-Memory) ---
+# !!! IMPORTANT: These lists are lost on bot restart without a database !!!
+exempt_users_from_ai_check = set() # Stores user IDs (int)
+exempt_channels_from_ai_check = set() # Stores channel IDs (int)
 
 # --- Helper Function to Get/Set Settings (Simulated DB) ---
 def get_setting(guild_id: int, key: str):
@@ -399,8 +403,50 @@ async def on_message(message: discord.Message):
     channel = message.channel
     member = guild.get_member(author_id)
 
-    # --- Ignore Mods/Admins ---
+    # --- Ignore Mods/Admins for everything below ---
     if member and channel.permissions_for(member).manage_messages: return
+
+    # --- Check Exemptions BEFORE Content Checks ---
+    if author_id in exempt_users_from_ai_check:
+        # print(f"DEBUG: Skipping content checks for exempt user {author_id}") # Optional debug log
+        pass # Skip content checks for this user, proceed to spam checks
+    elif channel.id in exempt_channels_from_ai_check:
+        # print(f"DEBUG: Skipping content checks for exempt channel {channel.id}") # Optional debug log
+        pass # Skip content checks in this channel, proceed to spam checks
+    else:
+        # --- 1. DeepSeek API Content Moderation (Primary Check) ---
+        violation_type = await check_message_with_deepseek(message.content)
+        if violation_type and violation_type != "Minor Violation":
+            # ... (API Violation Handling Logic - Delete, Log, Alert Mods) ...
+            print(f"🚫 API Violation ({violation_type}): by {author} in #{channel.name}")
+            # ... (delete message, log, alert mods logic) ...
+            return # Stop further checks
+
+        # --- 2. Bad Word Detection Logic (Optional Fallback) ---
+        if not violation_type and BAD_WORDS_LOWER:
+            content_lower = message.content.lower()
+            triggered_bad_word = None
+            for word in BAD_WORDS_LOWER:
+                if word in content_lower: triggered_bad_word = word; break
+            if triggered_bad_word:
+                # ... (Bad Word Handling Logic - Reminder, Warn, Log, Optional Kick) ...
+                print(f"🚫 Bad Word: '{triggered_bad_word}' by {message.author} in #{channel.name}")
+                # ... (First offense / Repeat offense logic) ...
+                return # Stop further checks
+
+    # --- Bot Spam Detection (Should happen regardless of user exemptions?) ---
+    # Or move this up if you want to detect bot spam even in exempt channels? Usually not needed.
+    # if message.author.bot: ... return
+
+    # --- User Spam Detection Logic (Runs even for exempt users/channels) ---
+    user_message_timestamps.setdefault(author_id, []); user_warnings.setdefault(author_id, 0)
+    # ... (The rest of the user spam detection logic remains the same) ...
+    user_message_timestamps[author_id].append(now)
+    time_limit_user = now - datetime.timedelta(seconds=SPAM_TIME_WINDOW_SECONDS)
+    user_message_timestamps[author_id] = [ts for ts in user_message_timestamps[author_id] if ts > time_limit_user]
+    if len(user_message_timestamps[author_id]) >= SPAM_COUNT_THRESHOLD:
+        # ... (User spam warning/kick logic) ...
+        pass # Full user spam logic here
 
     # --- 1. DeepSeek API Content Moderation ---
     violation_type = await check_message_with_deepseek(message.content)
@@ -655,7 +701,23 @@ async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(title="🤖 GJ Team Bot Help", description="可用的斜線指令:", color=discord.Color.purple())
     embed.add_field( name="🛠️ 管理與審核", value=("/createrole `身份組名稱`\n" "/deleterole `身份組名稱`\n" "/giverole `用戶` `身份組名稱`\n" "/takerole `用戶` `身份組名稱`\n" "/createseparator `標籤`\n" "/clear `數量`\n" "/warn `用戶` `[原因]`\n" "/unwarn `用戶` `[原因]`"), inline=False )
     embed.add_field(name="📢 公告", value=("/announce `頻道` `標題` `訊息` `[提及身份組]` `[圖片URL]` `[顏色]`"), inline=False)
-    embed.add_field(name="⚙️ 管理指令群組 (/管理)", value=("/管理 公告頻道 `[頻道]`\n" "/管理 紀錄頻道 `[頻道]`\n" "/管理 反應身分 (待實現)\n" "/管理 刪訊息 `用戶` `數量`\n" "/管理 頻道名 `新名稱`\n" "/管理 禁言 `用戶` `分鐘數` `[原因]`\n" "/管理 踢出 `用戶` `[原因]`\n" "/管理 封禁 `用戶ID` `[原因]`\n" "/管理 解封 `用戶ID` `[原因]`\n" "/管理 人數頻道 `[名稱模板]`"), inline=False)
+    embed.add_field(name="⚙️ 管理指令群組 (/管理)", value=(
+        "/管理 公告頻道 `[頻道]`\n"
+        "/管理 紀錄頻道 `[頻道]`\n"
+        "/管理 反應身分 (待實現)\n"
+        "/管理 刪訊息 `用戶` `數量`\n"
+        "/管理 頻道名 `新名稱`\n"
+        "/管理 禁言 `用戶` `分鐘數` `[原因]`\n"
+        "/管理 踢出 `用戶` `[原因]`\n"
+        "/管理 封禁 `用戶ID` `[原因]`\n"
+        "/管理 解封 `用戶ID` `[原因]`\n"
+        "/管理 人數頻道 `[名稱模板]`\n"
+        "**/管理 ai豁免 添加用戶 `用戶`**\n" # <-- 新增
+        "**/管理 ai豁免 移除用戶 `用戶`**\n" # <-- 新增
+        "**/管理 ai豁免 添加頻道 `頻道`**\n" # <-- 新增
+        "**/管理 ai豁免 移除頻道 `頻道`**\n" # <-- 新增
+        "**/管理 ai豁免 查看列表**"        # <-- 新增
+    ), inline=False)
     embed.add_field(name="🔊 臨時語音指令群組 (/語音)", value=("/語音 設定母頻道 `母頻道` `[分類]`\n" "/語音 設定權限 `對象` `[權限設定]`\n" "/語音 轉讓 `新房主`\n" "/語音 房主"), inline=False)
     embed.add_field(name="ℹ️ 其他", value="/help - 顯示此幫助訊息。", inline=False)
     embed.set_footer(text="<> = 必填, [] = 可選。大部分指令需管理權限。")
@@ -842,7 +904,81 @@ async def manage_log_channel(interaction: discord.Interaction, channel: discord.
          except discord.Forbidden: await interaction.followup.send(f"⚠️ 已設定 {channel.mention} 但 Bot 無法在此發送訊息!", ephemeral=True)
          except Exception as e: await interaction.followup.send(f"⚠️ 設定出錯: {e}", ephemeral=True)
      else: ch_id = get_setting(guild_id, "log_channel_id"); current_ch = interaction.guild.get_channel(ch_id) if ch_id else None; await interaction.followup.send(f"ℹ️ 目前紀錄頻道: {current_ch.mention if current_ch else '未設定'}", ephemeral=True)
+# --- Management Command Group Subcommands for AI Exemptions ---
 
+@manage_group.command(name="ai豁免-添加用戶", description="將用戶添加到 AI 内容檢測豁免列表 (需管理員)")
+@app_commands.describe(user="要豁免的用戶")
+@app_commands.checks.has_permissions(administrator=True) # Or manage_guild
+async def manage_ai_exempt_user_add(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    if user.bot: await interaction.followup.send("❌ 不能豁免機器人。", ephemeral=True); return
+    user_id = user.id
+    if user_id in exempt_users_from_ai_check:
+        await interaction.followup.send(f"ℹ️ 用戶 {user.mention} 已在 AI 檢測豁免列表中。", ephemeral=True)
+    else:
+        exempt_users_from_ai_check.add(user_id)
+        # !!! In real bot, save to DB here !!!
+        await interaction.followup.send(f"✅ 已將用戶 {user.mention} 添加到 AI 内容檢測豁免列表。", ephemeral=True)
+        print(f"[AI Exempt] Added user {user_id} by {interaction.user}")
+
+@manage_group.command(name="ai豁免-移除用戶", description="將用戶從 AI 内容檢測豁免列表中移除 (需管理員)")
+@app_commands.describe(user="要移除豁免的用戶")
+@app_commands.checks.has_permissions(administrator=True)
+async def manage_ai_exempt_user_remove(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    user_id = user.id
+    if user_id in exempt_users_from_ai_check:
+        exempt_users_from_ai_check.remove(user_id)
+        # !!! In real bot, remove from DB here !!!
+        await interaction.followup.send(f"✅ 已將用戶 {user.mention} 從 AI 内容檢測豁免列表中移除。", ephemeral=True)
+        print(f"[AI Exempt] Removed user {user_id} by {interaction.user}")
+    else:
+        await interaction.followup.send(f"ℹ️ 用戶 {user.mention} 不在 AI 檢測豁免列表中。", ephemeral=True)
+
+@manage_group.command(name="ai豁免-添加頻道", description="將頻道添加到 AI 内容檢測豁免列表 (需管理員)")
+@app_commands.describe(channel="要豁免的文字頻道")
+@app_commands.checks.has_permissions(administrator=True)
+async def manage_ai_exempt_channel_add(interaction: discord.Interaction, channel: discord.TextChannel):
+    await interaction.response.defer(ephemeral=True)
+    channel_id = channel.id
+    if channel_id in exempt_channels_from_ai_check:
+        await interaction.followup.send(f"ℹ️ 頻道 {channel.mention} 已在 AI 檢測豁免列表中。", ephemeral=True)
+    else:
+        exempt_channels_from_ai_check.add(channel_id)
+        # !!! In real bot, save to DB here !!!
+        await interaction.followup.send(f"✅ 已將頻道 {channel.mention} 添加到 AI 内容檢測豁免列表。", ephemeral=True)
+        print(f"[AI Exempt] Added channel {channel_id} by {interaction.user}")
+
+@manage_group.command(name="ai豁免-移除頻道", description="將頻道從 AI 内容檢測豁免列表中移除 (需管理員)")
+@app_commands.describe(channel="要移除豁免的文字頻道")
+@app_commands.checks.has_permissions(administrator=True)
+async def manage_ai_exempt_channel_remove(interaction: discord.Interaction, channel: discord.TextChannel):
+    await interaction.response.defer(ephemeral=True)
+    channel_id = channel.id
+    if channel_id in exempt_channels_from_ai_check:
+        exempt_channels_from_ai_check.remove(channel_id)
+        # !!! In real bot, remove from DB here !!!
+        await interaction.followup.send(f"✅ 已將頻道 {channel.mention} 從 AI 内容檢測豁免列表中移除。", ephemeral=True)
+        print(f"[AI Exempt] Removed channel {channel_id} by {interaction.user}")
+    else:
+        await interaction.followup.send(f"ℹ️ 頻道 {channel.mention} 不在 AI 檢測豁免列表中。", ephemeral=True)
+
+@manage_group.command(name="ai豁免-查看列表", description="查看當前 AI 内容檢測的豁免列表 (需管理員)")
+@app_commands.checks.has_permissions(administrator=True)
+async def manage_ai_exempt_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild: await interaction.followup.send("...", ephemeral=True); return
+
+    exempt_user_mentions = [f"<@{uid}>" for uid in exempt_users_from_ai_check]
+    exempt_channel_mentions = [f"<#{cid}>" for cid in exempt_channels_from_ai_check]
+
+    embed = discord.Embed(title="⚙️ AI 内容檢測豁免列表", color=discord.Color.light_grey())
+    embed.add_field(name="豁免用戶", value=", ".join(exempt_user_mentions) if exempt_user_mentions else "無", inline=False)
+    embed.add_field(name="豁免頻道", value=", ".join(exempt_channel_mentions) if exempt_channel_mentions else "無", inline=False)
+    embed.set_footer(text="注意：列表在機器人重啟後會清空（除非使用資料庫）。")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 @manage_group.command(name="反應身分", description="設定反應身份組 (待實現)")
 @app_commands.checks.has_permissions(manage_roles=True)
 async def manage_reaction_roles(interaction: discord.Interaction): await interaction.response.send_message("🚧 反應身份組功能待實現 (建議使用 Buttons)。", ephemeral=True)
