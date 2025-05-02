@@ -962,7 +962,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         print(f"🔊 用户 {member.name} 加入了母频道 ({master_channel.name})，准备创建临时频道...")
         new_channel = None # Init before try
         try:
-            owner_overwrites = discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True, stream=True, use_voice_activation=True, priority_speaker=True, mute_members=True, deafen_members=True, use_embedded_activities=True, video=True)
+            owner_overwrites = discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True, stream=True, use_voice_activation=True, priority_speaker=True, mute_members=True, deafen_members=True, use_embedded_activities=True)
             everyone_overwrites = discord.PermissionOverwrite(connect=True, speak=True)
             bot_overwrites = discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True, connect=True, view_channel=True)
             temp_channel_name = f"🎮 {member.display_name} 的频道"[:100]
@@ -1875,7 +1875,7 @@ async def voice_transfer(interaction: discord.Interaction, new_owner: discord.Me
     if not user_vc.permissions_for(interaction.guild.me).manage_permissions: await interaction.followup.send(f"⚙️ 操作失败：机器人缺少 '管理权限' 能力。", ephemeral=True); return
 
     try:
-        new_owner_overwrites = discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True, stream=True, use_voice_activation=True, priority_speaker=True, mute_members=True, deafen_members=True, use_embedded_activities=True, video=True)
+        new_owner_overwrites = discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True,connect=True, speak=True, stream=True, use_voice_activation=True, priority_speaker=True, mute_members=True, deafen_members=True, use_embedded_activities=True)
         old_owner_overwrites = discord.PermissionOverwrite() # Clear old owner's special perms
         await user_vc.set_permissions(new_owner, overwrite=new_owner_overwrites, reason=f"所有权由 {user.name} 转让")
         await user_vc.set_permissions(user, overwrite=old_owner_overwrites, reason=f"所有权转让给 {new_owner.name}")
@@ -1902,7 +1902,7 @@ async def voice_claim(interaction: discord.Interaction):
     if not user_vc.permissions_for(interaction.guild.me).manage_permissions: await interaction.followup.send(f"⚙️ 操作失败：机器人缺少 '管理权限' 能力。", ephemeral=True); return
 
     try:
-        new_owner_overwrites = discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True, stream=True, use_voice_activation=True, priority_speaker=True, mute_members=True, deafen_members=True, use_embedded_activities=True, video=True)
+        new_owner_overwrites = discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True, connect=True, speak=True, stream=True, use_voice_activation=True, priority_speaker=True, mute_members=True, deafen_members=True, use_embedded_activities=True)
         await user_vc.set_permissions(user, overwrite=new_owner_overwrites, reason=f"由 {user.name} 获取房主权限")
         if original_owner: # Reset old owner perms if they existed
              try: await user_vc.set_permissions(original_owner, overwrite=None, reason="原房主离开，重置权限")
