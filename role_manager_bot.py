@@ -5,6 +5,7 @@ from discord import app_commands, ui # Added ui
 from discord.ext import commands
 from discord.utils import get
 import os
+import time # 用于计算 API 延迟
 import datetime
 import asyncio
 from typing import Optional, Union
@@ -1042,13 +1043,14 @@ async def slash_help(interaction: discord.Interaction):
         inline=False
     )
 
-    # 审核与管理
+        # 审核与管理
     embed.add_field(
         name="🛠️ 审核与管理",
         value=(
             "`/clear [数量]` - 清除当前频道消息 (1-100)\n"
             "`/warn [用户] [原因]` - 手动警告用户 (累计3次踢出)\n"
-            "`/unwarn [用户] [原因]` - 移除用户一次警告"
+            "`/unwarn [用户] [原因]` - 移除用户一次警告\n"  # <--- 确保这里有换行符
+            "`/notify_member [用户] [消息内容]` - 通过机器人向指定成员发送私信。" # <--- 新增这行
         ),
         inline=False
     )
@@ -1095,8 +1097,15 @@ async def slash_help(interaction: discord.Interaction):
         inline=False
     )
 
-    # 其他
-    embed.add_field(name="ℹ️ 其他", value="`/help` - 显示此帮助信息", inline=False)
+        # 其他
+    embed.add_field(
+        name="ℹ️ 其他",
+        value=(
+            "`/help` - 显示此帮助信息\n"
+            "`/ping` - 查看机器人与服务器的延迟"  # <--- 新增这行
+        ),
+        inline=False
+    )
 
     embed.set_footer(text="[] = 必填参数, <> = 可选参数。大部分管理指令需要相应权限。")
     embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
@@ -1409,6 +1418,119 @@ async def slash_announce(
         print(f"[公告] 用户 {author} 在频道 #{channel.name} 发布了公告: '{title}'")
     except discord.Forbidden: await interaction.followup.send(f"❌ 发送失败：机器人缺少在频道 {channel.mention} 发送消息或嵌入链接的权限。", ephemeral=True)
     except Exception as e: print(f"执行 /announce 时出错: {e}"); await interaction.followup.send(f"❌ 发送公告时发生未知错误: {e}", ephemeral=True)
+    # --- (在这里或类似位置添加以下代码) ---
+
+@bot.tree.command(name="notify_member", description="通过机器人向指定成员发送私信 (需要管理服务器权限)。")
+@app_commands.describe(
+    member="要接收私信的成员。",
+    message_content="要发送的私信内容。"
+)
+@app_commands.checks.has_permissions(manage_guild=True) # 只有拥有“管理服务器”权限的用户才能使用
+async def slash_notify_member(interaction: discord.Interaction, member: discord.Member, message_content: str):
+    guild = interaction.guild
+    author = interaction.user
+    await interaction.response.defer(ephemeral=True) # 回复设为临时，仅执行者可见
+
+    if not guild:
+        await interaction.followup.send("此命令只能在服务器中使用。", ephemeral=True)
+        return
+    if member.bot:
+        await interaction.followup.send("❌ 不能向机器人发送私信。", ephemeral=True)
+        return
+    if member == author:
+        await interaction.followup.send("❌ 你不能给自己发送私信。", ephemeral=True)
+        return
+    if len(message_content) > 1900: # Discord DM 限制为 2000，留一些余量
+        await interaction.followup.send("❌ 消息内容过长 (最多约1900字符)。", ephemeral=True)
+        return
+
+    # 创建私信的 Embed 消息
+    dm_embed = discord.Embed(
+        title=f"来自服务器 {guild.name} 管理员的消息",
+        description=message_content,
+        color=discord.Color.blue(), # 你可以自定义颜色
+        timestamp=discord.utils.utcnow()
+    )
+    dm_embed.set_footer(text=f"发送者: {author.display_name}")
+    if author.avatar: # 如果发送者有头像，则使用
+        dm_embed.set_author(name=f"来自 {author.display_name}", icon_url=author.display_avatar.url)
+    else:
+        dm_embed.set_author(name=f"来自 {author.display_name}")
+
+    try:
+        await member.send(embed=dm_embed)
+        await interaction.followup.send(f"✅ 已成功向 {member.mention} 发送私信。", ephemeral=True)
+        print(f"[通知] 用户 {author} ({author.id}) 通过机器人向 {member.name} ({member.id}) 发送了私信。")
+
+        # （可选）在公共日志频道记录操作 (不记录具体内容，保护隐私)
+        log_embed_public = discord.Embed(
+            title="📬 成员私信已发送",
+            description=f"管理员通过机器人向成员发送了一条私信。",
+            color=discord.Color.blurple(), # 和私信颜色区分
+            timestamp=discord.utils.utcnow()
+        )
+        log_embed_public.add_field(name="执行管理员", value=author.mention, inline=True)
+        log_embed_public.add_field(name="接收成员", value=member.mention, inline=True)
+        log_embed_public.set_footer(text=f"执行者 ID: {author.id} | 接收者 ID: {member.id}")
+        await send_to_public_log(guild, log_embed_public, log_type="Member DM Sent")
+
+    except discord.Forbidden:
+        await interaction.followup.send(f"❌ 无法向 {member.mention} 发送私信。可能原因：该用户关闭了来自服务器成员的私信，或屏蔽了机器人。", ephemeral=True)
+        print(f"[通知失败] 无法向 {member.name} ({member.id}) 发送私信 (Forbidden)。")
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ 发送私信给 {member.mention} 时发生网络错误: {e}", ephemeral=True)
+        print(f"[通知失败] 发送私信给 {member.name} ({member.id}) 时发生HTTP错误: {e}")
+    except Exception as e:
+        await interaction.followup.send(f"❌ 发送私信时发生未知错误: {e}", ephemeral=True)
+        print(f"[通知失败] 发送私信给 {member.name} ({member.id}) 时发生未知错误: {e}")
+        # ... (你现有的 slash_notify_member 指令的完整代码) ...
+    except Exception as e:
+        await interaction.followup.send(f"❌ 发送私信时发生未知错误: {e}", ephemeral=True)
+        print(f"[通知失败] 发送私信给 {member.name} ({member.id}) 时发生未知错误: {e}")
+
+
+# ↓↓↓↓ 在这里粘贴新的 ping 指令的完整代码 ↓↓↓↓
+@bot.tree.command(name="ping", description="检查机器人与 Discord 服务器的延迟。")
+async def slash_ping(interaction: discord.Interaction):
+    """显示机器人的延迟信息。"""
+    # defer=True 使得交互立即得到响应，机器人有更多时间处理
+    # ephemeral=True 使得这条消息只有发送者可见
+    await interaction.response.defer(ephemeral=True)
+
+    # 1. WebSocket 延迟 (机器人与Discord网关的连接延迟)
+    websocket_latency = bot.latency
+    websocket_latency_ms = round(websocket_latency * 1000)
+
+    # 2. API 延迟 (发送一条消息并测量所需时间)
+    # 我们将发送初始回复，然后编辑它来计算延迟
+    start_time = time.monotonic()
+    # 发送一个占位消息，后续会编辑它
+    # 注意：因为我们已经 defer() 了，所以第一次发送必须用 followup()
+    message_to_edit = await interaction.followup.send("正在 Ping API...", ephemeral=True)
+    end_time = time.monotonic()
+    api_latency_ms = round((end_time - start_time) * 1000)
+
+
+    # 创建最终的 Embed 消息
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        color=discord.Color.green(), # 你可以自定义颜色
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="📡 WebSocket 延迟", value=f"{websocket_latency_ms} ms", inline=True)
+    embed.add_field(name="↔️ API 消息延迟", value=f"{api_latency_ms} ms", inline=True)
+    embed.set_footer(text=f"请求者: {interaction.user.display_name}")
+
+    # 编辑之前的占位消息，显示完整的延迟信息
+    await message_to_edit.edit(content=None, embed=embed)
+
+    print(f"[状态] 用户 {interaction.user} 执行了 /ping。WebSocket: {websocket_latency_ms}ms, API: {api_latency_ms}ms")
+# ↑↑↑↑ 新的 ping 指令代码结束 ↑↑↑↑
+
+
+# --- Management Command Group Definitions ---
+manage_group = app_commands.Group(name="管理", description="服务器高级管理相关指令 (需要相应权限)")
+# ... (后续的 manage_group 指令组代码) ...
 
 
 # --- Management Command Group Definitions ---
