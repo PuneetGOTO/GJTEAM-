@@ -18,6 +18,9 @@ except ImportError:
     AIOHTTP_AVAILABLE = False
     print("⚠️ 警告: 未安装 'aiohttp' 库。 /announce 中的图片URL验证将使用 'requests' (可能阻塞)。建议运行: pip install aiohttp")
 
+import io
+import html
+
 
 # --- Configuration ---
 # !!! 重要：从环境变量加载 Bot Token !!!
@@ -219,6 +222,152 @@ async def check_message_with_deepseek(message_content: str) -> Optional[str]:
         print(f"❌ DeepSeek 检查期间发生意外错误: {e}")
         return None
 
+        # --- Helper Function: Generate HTML Transcript for Tickets ---
+async def generate_ticket_transcript_html(channel: discord.TextChannel) -> Optional[str]:
+    """Generates an HTML transcript for the given text channel."""
+    if not isinstance(channel, discord.TextChannel):
+        return None
+
+    messages_history = []
+    # Fetch all messages, oldest first.
+    async for message in channel.history(limit=None, oldest_first=True):
+        messages_history.append(message)
+
+    if not messages_history:
+        return f"""
+        <!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>票据记录 - {html.escape(channel.name)}</title>
+        <style>body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #2C2F33; color: #DCDDDE; text-align: center; }} 
+        .container {{ background-color: #36393F; padding: 20px; border-radius: 8px; display: inline-block; }}</style></head>
+        <body><div class="container"><h1>票据 #{html.escape(channel.name)}</h1><p>此票据中没有消息。</p></div></body></html>
+        """
+
+    message_html_blocks = []
+    for msg in messages_history:
+        author_name_full = html.escape(f"{msg.author.name}#{msg.author.discriminator if msg.author.discriminator != '0' else ''}")
+        author_id = msg.author.id
+        avatar_url = msg.author.display_avatar.url
+        timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        
+        content_escaped = ""
+        is_system_message = msg.type != discord.MessageType.default and msg.type != discord.MessageType.reply
+
+        if is_system_message:
+            if msg.system_content:
+                content_escaped = f"<em>系统消息: {html.escape(msg.system_content)}</em>"
+            else:
+                content_escaped = f"<em>(系统消息: {msg.type.name})</em>"
+        elif msg.content:
+            content_escaped = html.escape(msg.content).replace("\n", "<br>")
+
+        attachments_html = ""
+        if msg.attachments:
+            links = []
+            for attachment in msg.attachments:
+                links.append(f'<a href="{attachment.url}" target="_blank" rel="noopener noreferrer">[{html.escape(attachment.filename)}]</a>')
+            attachments_html = f'<div class="attachments">附件: {", ".join(links)}</div>'
+
+        embeds_html = ""
+        if msg.embeds:
+            embed_parts = []
+            for embed_idx, embed in enumerate(msg.embeds):
+                embed_str = f'<div class="embed embed-{embed_idx+1}">'
+                if embed.title:
+                    embed_str += f'<div class="embed-title">{html.escape(embed.title)}</div>'
+                if embed.description:
+                    embed_str += f'<div class="embed-description">{html.escape(embed.description).replace("\n", "<br>")}</div>'
+                
+                fields_html = ""
+                if embed.fields:
+                    fields_html += '<div class="embed-fields">'
+                    for field in embed.fields:
+                        field_name = html.escape(field.name) if field.name else " "
+                        field_value = html.escape(field.value).replace("\n", "<br>") if field.value else " "
+                        inline_class = " embed-field-inline" if field.inline else ""
+                        fields_html += f'<div class="embed-field{inline_class}"><strong>{field_name}</strong><br>{field_value}</div>'
+                    fields_html += '</div>'
+                embed_str += fields_html
+
+                if embed.footer and embed.footer.text:
+                    embed_str += f'<div class="embed-footer">{html.escape(embed.footer.text)}</div>'
+                if embed.author and embed.author.name:
+                    embed_str += f'<div class="embed-author">作者: {html.escape(embed.author.name)}</div>'
+                if not embed.title and not embed.description and not embed.fields:
+                    embed_str += '<em>(嵌入内容)</em>'
+                embed_str += '</div>'
+                embed_parts.append(embed_str)
+            embeds_html = "".join(embed_parts)
+
+        message_block = f"""
+        <div class="message {'system-message' if is_system_message else ''}">
+            <div class="message-header">
+                <img src="{avatar_url}" alt="{html.escape(msg.author.name)}'s avatar" class="author-avatar">
+                <div class="author-details">
+                    <span class="author" title="User ID: {author_id}">{author_name_full}</span>
+                </div>
+                <span class="timestamp">{timestamp}</span>
+            </div>
+            <div class="content-area">
+                {f'<div class="content"><p>{content_escaped}</p></div>' if content_escaped else ""}
+                {attachments_html}
+                {embeds_html}
+            </div>
+        </div>
+        """
+        message_html_blocks.append(message_block)
+
+    full_html_template = f"""
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>票据记录 - {html.escape(channel.name)}</title>
+        <style>
+            body {{ font-family: 'Whitney', 'Helvetica Neue', Helvetica, Arial, sans-serif; margin: 0; padding: 0; background-color: #36393f; color: #dcddde; font-size: 16px; line-height: 1.6; }}
+            .container {{ max-width: 90%; width: 800px; margin: 20px auto; background-color: #36393f; padding: 20px; border-radius: 8px; box-shadow: 0 0 15px rgba(0,0,0,0.5); }}
+            .header {{ text-align: center; border-bottom: 1px solid #4f545c; padding-bottom: 15px; margin-bottom: 20px; }}
+            .header h1 {{ color: #ffffff; margin: 0 0 5px 0; font-size: 24px; }}
+            .header p {{ font-size: 12px; color: #b9bbbe; margin: 0; }}
+            .message {{ display: flex; flex-direction: column; padding: 12px 0; border-top: 1px solid #40444b; }}
+            .message:first-child {{ border-top: none; }}
+            .message-header {{ display: flex; align-items: center; margin-bottom: 6px; }}
+            .author-avatar {{ width: 40px; height: 40px; border-radius: 50%; margin-right: 12px; background-color: #2f3136; }}
+            .author-details {{ display: flex; flex-direction: column; flex-grow: 1; }}
+            .author {{ font-weight: 500; color: #ffffff; font-size: 1em; }}
+            .timestamp {{ font-size: 0.75em; color: #72767d; margin-left: 8px; white-space: nowrap; }}
+            .content-area {{ margin-left: 52px; /* Align with author name, after avatar */ }}
+            .content p {{ margin: 0 0 5px 0; white-space: pre-wrap; word-wrap: break-word; color: #dcddde; }}
+            .attachments, .embed {{ margin-top: 8px; font-size: 0.9em; }}
+            .attachments {{ padding: 5px; background-color: #2f3136; border-radius: 3px; }}
+            .attachment a {{ color: #00aff4; text-decoration: none; margin-right: 5px; }}
+            .attachment a:hover {{ text-decoration: underline; }}
+            .embed {{ border-left: 4px solid #4f545c; padding: 10px; background-color: #2f3136; border-radius: 4px; margin-bottom: 5px; }}
+            .embed-title {{ font-weight: bold; color: #ffffff; margin-bottom: 4px; }}
+            .embed-description {{ color: #b9bbbe; font-size: 0.95em; }}
+            .embed-fields {{ display: flex; flex-wrap: wrap; margin-top: 8px; }}
+            .embed-field {{ padding: 5px; margin-bottom: 5px; flex-basis: 100%; }}
+            .embed-field-inline {{ flex-basis: calc(50% - 10px); margin-right: 10px; }} /* Adjust for closer to Discord layout */
+            .embed-field strong {{ color: #ffffff; }}
+            .embed-footer, .embed-author {{ font-size: 0.8em; color: #72767d; margin-top: 5px; }}
+            .system-message .content p {{ font-style: italic; color: #72767d; }}
+            em {{ color: #b9bbbe; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>票据记录: #{html.escape(channel.name)}</h1>
+                <p>服务器: {html.escape(channel.guild.name)} ({channel.guild.id})</p>
+                <p>频道 ID: {channel.id}</p>
+                <p>生成时间: {datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}</p>
+            </div>
+            {''.join(message_html_blocks)}
+        </div>
+    </body>
+    </html>
+    """
+    return full_html_template.strip()
+
 # --- Ticket Tool UI Views ---
 
 # View for the button to close a ticket
@@ -229,43 +378,139 @@ class CloseTicketView(ui.View):
     @ui.button(label="关闭票据", style=discord.ButtonStyle.danger, custom_id="close_ticket_button")
     async def close_button(self, interaction: discord.Interaction, button: ui.Button):
         guild = interaction.guild
-        channel = interaction.channel
+        channel = interaction.channel # This is the ticket channel
         user = interaction.user # The user clicking the close button
 
+        await interaction.response.defer(ephemeral=True) # Acknowledge button click privately
+
         if not guild or not isinstance(channel, discord.TextChannel):
-             await interaction.response.send_message("❌ 操作无法在此处完成。", ephemeral=True)
+             await interaction.followup.send("❌ 操作无法在此处完成。", ephemeral=True)
              return
 
-        # --- 权限检查: 票据创建者 或 票据员工 或 有管理频道权限的人 ---
-        # 1. 查找票据创建者ID (从 open_tickets 反查)
+        # --- 权限逻辑已简化 ---
+        # 根据请求，移除了对关闭者身份的严格检查。
+        # 任何能在此频道点击按钮的用户现在都可以尝试关闭。
+        # 仍然获取创建者ID用于日志记录。
         creator_id = None
         guild_tickets = open_tickets.get(guild.id, {})
         for uid, chan_id in guild_tickets.items():
             if chan_id == channel.id:
                 creator_id = uid
                 break
+        # --- 权限逻辑简化结束 ---
 
-        is_creator = (creator_id == user.id)
 
-        # 2. 检查票据员工
-        staff_role_ids = get_setting(ticket_settings, guild.id, "staff_role_ids") or []
-        is_staff = False
-        if isinstance(user, discord.Member): # Ensure user is a Member object to check roles
-             is_staff = any(role.id in staff_role_ids for role in user.roles)
+        # --- 生成聊天记录 ---
+        transcript_html_content = None
+        # 为文件名清理频道名称
+        sanitized_channel_name = "".join(c for c in str(channel.name) if c.isalnum() or c in ('-', '_')).lower()
+        if not sanitized_channel_name: sanitized_channel_name = f"ticket-{channel.id}"
+        transcript_filename = f"transcript-{sanitized_channel_name}-{channel.id}.html"
+        
+        transcript_generation_message_to_closer = "" # 给关闭者的反馈消息
+        transcript_dm_sent_to_closer = False
+        transcript_sent_to_admin_channel = False
 
-        # 3. 检查通用管理权限
-        can_manage_channels = channel.permissions_for(user).manage_channels
+        try:
+            transcript_html_content = await generate_ticket_transcript_html(channel)
+            if transcript_html_content is None: 
+                 transcript_generation_message_to_closer = "⚠️ 未能生成票据聊天记录副本 (可能读取错误或频道为空)。"
+        except Exception as e:
+            print(f"   - ❌ 生成频道 {channel.id} 的聊天记录时发生错误: {e}")
+            transcript_generation_message_to_closer = "⚠️ 生成票据聊天记录副本时发生内部错误。"
 
-        if not is_creator and not is_staff and not can_manage_channels:
-            await interaction.response.send_message("❌ 你没有权限关闭此票据。只有票据创建者或指定员工可以关闭。", ephemeral=True)
-            return
+        # 1. 尝试将聊天记录私信给关闭者
+        if transcript_html_content:
+            try:
+                html_file_bytes = transcript_html_content.encode('utf-8')
+                transcript_file_obj = discord.File(io.BytesIO(html_file_bytes), filename=transcript_filename)
+                await user.send(
+                    f"你好 {user.mention}，你关闭的票据 **#{channel.name}** (ID: {channel.id}) 的聊天记录副本如下：", 
+                    file=transcript_file_obj
+                )
+                print(f"   - ✅ 已将票据 {channel.name} 的聊天记录私信给关闭者 {user.name} ({user.id})")
+                transcript_generation_message_to_closer = "聊天记录副本已通过私信发送给你。"
+                transcript_dm_sent_to_closer = True
+            except discord.Forbidden:
+                print(f"   - ⚠️ 无法将聊天记录私信给关闭者 {user.name} ({user.id})：用户可能关闭了私信或屏蔽了机器人。")
+                transcript_generation_message_to_closer = "⚠️ 无法将聊天记录私信给你 (可能关闭了私信)。文件已生成但未发送。"
+            except Exception as e:
+                print(f"   - ❌ 发送聊天记录给关闭者 {user.name} ({user.id}) 时发生错误: {e}")
+                transcript_generation_message_to_closer = f"⚠️ 尝试私信聊天记录副本时发生错误: {e}"
+        elif not transcript_generation_message_to_closer: # 如果 transcript_html_content 为 None 且没有特定错误消息
+             transcript_generation_message_to_closer = "⚠️ 未能生成票据聊天记录副本 (频道可能为空或读取错误)。"
 
-        # --- 执行关闭 ---
-        await interaction.response.defer(ephemeral=True) # Acknowledge button click privately
-        await channel.send(f"⏳ {user.mention} 已请求关闭此票据，频道将在几秒后删除...")
-        print(f"[票据] 用户 {user} ({user.id}) 正在关闭票据频道 #{channel.name} ({channel.id})")
+        # 2. 尝试将聊天记录发送到管理员/日志频道
+        admin_log_channel_id_for_transcript = PUBLIC_WARN_LOG_CHANNEL_ID # 使用现有的公共日志频道ID
+        admin_log_channel_object = None
 
-        # (可选) 记录日志
+        # 检查是否配置了有效的日志频道ID (不是None也不是默认的示例ID)
+        if transcript_html_content and admin_log_channel_id_for_transcript and admin_log_channel_id_for_transcript != 1363523347169939578: # <--- 确保这里使用你正确的示例ID
+            admin_log_channel_object = guild.get_channel(admin_log_channel_id_for_transcript)
+            if admin_log_channel_object and isinstance(admin_log_channel_object, discord.TextChannel):
+                bot_perms = admin_log_channel_object.permissions_for(guild.me)
+                if bot_perms.send_files and bot_perms.send_messages: # 发送文件和附带消息都需要权限
+                    try:
+                        # 重新创建 BytesIO 对象以再次发送文件
+                        html_file_bytes_for_admin = transcript_html_content.encode('utf-8')
+                        transcript_file_obj_for_admin = discord.File(io.BytesIO(html_file_bytes_for_admin), filename=transcript_filename)
+                        
+                        creator_mention_log = f"<@{creator_id}>" if creator_id else "未知"
+                        try: # 尝试获取更友好的创建者名称
+                            if creator_id:
+                                 creator_user_obj_temp = await bot.fetch_user(creator_id)
+                                 creator_mention_log = f"{creator_user_obj_temp.mention} (`{creator_user_obj_temp}`)"
+                        except: pass
+
+                        admin_message_content = (
+                            f"票据 **#{channel.name}** (ID: `{channel.id}`) 已由 {user.mention} 关闭。\n"
+                            f"创建者: {creator_mention_log}.\n"
+                            f"聊天记录副本见附件。"
+                        )
+                        await admin_log_channel_object.send(content=admin_message_content, file=transcript_file_obj_for_admin)
+                        print(f"   - ✅ 已将票据 {channel.name} 的聊天记录发送到管理频道 {admin_log_channel_object.name} ({admin_log_channel_id_for_transcript})")
+                        transcript_sent_to_admin_channel = True
+                    except discord.Forbidden:
+                        print(f"   - ❌ 发送聊天记录到管理频道 {admin_log_channel_id_for_transcript} 失败：机器人缺少发送文件/消息权限。")
+                    except Exception as log_send_e:
+                        print(f"   - ❌ 发送聊天记录到管理频道 {admin_log_channel_id_for_transcript} 时发生错误: {log_send_e}")
+                else:
+                    print(f"   - ⚠️ 无法发送聊天记录到管理频道 {admin_log_channel_id_for_transcript}：机器人缺少发送文件/消息权限。")
+            elif admin_log_channel_id_for_transcript and admin_log_channel_id_for_transcript != 1363523347169939578 : # <--- 确保这里使用你正确的示例ID
+                 print(f"   - ⚠️ 管理员日志频道ID ({admin_log_channel_id_for_transcript}) 无效或不是文本频道，无法发送聊天记录。")
+        elif transcript_html_content and (not admin_log_channel_id_for_transcript or admin_log_channel_id_for_transcript == 1363523347169939578): # <--- 确保这里使用你正确的示例ID
+            print(f"   - ℹ️ 未配置有效的公共日志频道ID (或为示例ID)，跳过发送聊天记录给管理员。")
+
+
+        # --- 在票据频道中宣布关闭 ---
+        public_close_message_parts = [f"⏳ {user.mention} 已请求关闭此票据。"]
+        if transcript_dm_sent_to_closer:
+            public_close_message_parts.append("聊天记录副本已发送给关闭者。")
+        elif transcript_html_content: 
+            public_close_message_parts.append("尝试发送聊天记录副本给关闭者失败。")
+        else: 
+            public_close_message_parts.append("未能生成聊天记录副本。")
+        
+        if transcript_sent_to_admin_channel:
+            public_close_message_parts.append("聊天记录副本已发送给管理员。")
+        elif transcript_html_content and admin_log_channel_id_for_transcript and admin_log_channel_id_for_transcript != 1363523347169939578: # <--- 确保这里使用你正确的示例ID
+            # 只有在尝试发送但失败时才报告给频道用户
+            public_close_message_parts.append("尝试发送聊天记录副本给管理员失败。")
+            
+        public_close_message_parts.append("频道将在几秒后删除...")
+        final_public_close_message = "\n".join(public_close_message_parts)
+        
+        try:
+            await channel.send(final_public_close_message)
+        except discord.Forbidden:
+            print(f"   - ⚠️ 无法在票据频道 {channel.name} 发送关闭通知 (权限不足)。")
+        except Exception as e:
+            print(f"   - ⚠️ 在票据频道 {channel.name} 发送关闭通知时出错: {e}")
+
+
+        print(f"[票据] 用户 {user} ({user.id}) 关闭了票据频道 #{channel.name} ({channel.id})")
+
+        # --- 记录日志 (到公共日志频道) ---
         log_embed = discord.Embed(
             title="🎫 票据已关闭",
             description=f"票据频道 **#{channel.name}** 已被关闭。",
@@ -275,13 +520,31 @@ class CloseTicketView(ui.View):
         log_embed.add_field(name="关闭者", value=user.mention, inline=True)
         log_embed.add_field(name="频道 ID", value=str(channel.id), inline=True)
         if creator_id:
-           creator_mention = f"<@{creator_id}>"
+           creator_display = f"<@{creator_id}>"
            try:
-               creator_user = await bot.fetch_user(creator_id)
-               creator_mention = f"{creator_user.mention} (`{creator_user}`)"
-           except: pass # Keep ID if fetch fails
-           log_embed.add_field(name="创建者", value=creator_mention, inline=True)
+               creator_user_obj = await bot.fetch_user(creator_id)
+               creator_display = f"{creator_user_obj.mention} (`{creator_user_obj}`)"
+           except: pass 
+           log_embed.add_field(name="创建者", value=creator_display, inline=True)
+        
+        transcript_log_parts = []
+        if transcript_html_content:
+            transcript_log_parts.append("已生成。")
+            if transcript_dm_sent_to_closer: transcript_log_parts.append("已私信关闭者。")
+            else: transcript_log_parts.append("私信关闭者失败。")
+            if transcript_sent_to_admin_channel: transcript_log_parts.append("已发送至管理频道。")
+            elif admin_log_channel_id_for_transcript and admin_log_channel_id_for_transcript != 1363523347169939578: # <--- 确保这里使用你正确的示例ID (尝试发送但失败)
+                transcript_log_parts.append("发送至管理频道失败。")
+            else: # 未尝试发送到管理频道 (未配置)
+                transcript_log_parts.append("未发送至管理频道(未配置或为示例ID)。")
+        else:
+            transcript_log_parts.append("未生成。")
+        log_embed.add_field(name="聊天记录状态", value=" ".join(transcript_log_parts).strip(), inline=False)
+        
+        # 使用 send_to_public_log 发送 Embed 日志，但不发送 HTML 文件到这里
+        # HTML 文件如果需要，是独立发送到 admin_log_channel_object 的
         await send_to_public_log(guild, log_embed, log_type="Ticket Closed")
+
 
         # 从 open_tickets 中移除记录
         if creator_id and guild.id in open_tickets and creator_id in open_tickets[guild.id]:
@@ -289,42 +552,64 @@ class CloseTicketView(ui.View):
                  del open_tickets[guild.id][creator_id]
                  print(f"   - 已从 open_tickets 移除记录 (用户: {creator_id}, 频道: {channel.id})")
 
-        # 延迟几秒让用户看到消息，然后删除频道
-        await asyncio.sleep(5)
+        # 延迟并删除频道
+        await asyncio.sleep(7) 
+        delete_status_message = ""
         try:
             await channel.delete(reason=f"票据由 {user.name} 关闭")
             print(f"   - 已成功删除票据频道 #{channel.name}")
-            await interaction.followup.send("✅ 票据频道已删除。", ephemeral=True)
+            delete_status_message = "✅ 票据频道已成功删除。"
         except discord.Forbidden:
              print(f"   - 删除票据频道 #{channel.name} 失败：机器人缺少权限。")
-             await interaction.followup.send("❌ 无法删除频道：机器人缺少权限。", ephemeral=True)
+             delete_status_message = "❌ 无法删除频道：机器人缺少权限。"
         except discord.NotFound:
              print(f"   - 删除票据频道 #{channel.name} 失败：频道未找到 (可能已被删除)。")
-             # No need to followup if channel is already gone
+             delete_status_message = "ℹ️ 票据频道似乎已被删除。" 
         except Exception as e:
             print(f"   - 删除票据频道 #{channel.name} 时发生错误: {e}")
-            try:
-                await interaction.followup.send(f"❌ 删除频道时发生错误: {e}", ephemeral=True)
-            except discord.NotFound: pass # Interaction might be gone
+            delete_status_message = f"❌ 删除频道时发生错误: {e}"
 
+        # --- 给关闭者的最终反馈 ---
+        final_followup_parts = [delete_status_message, transcript_generation_message_to_closer]
+        admin_send_feedback_to_closer = ""
+        if transcript_html_content: 
+            if transcript_sent_to_admin_channel:
+                admin_send_feedback_to_closer = "聊天记录副本也已发送至管理频道。"
+            elif admin_log_channel_id_for_transcript and admin_log_channel_id_for_transcript != 1363523347169939578: # <--- 确保这里使用你正确的示例ID (尝试发送但失败)
+                admin_send_feedback_to_closer = "尝试发送聊天记录至管理频道失败。"
+        
+        if admin_send_feedback_to_closer:
+            final_followup_parts.append(admin_send_feedback_to_closer)
+
+        final_followup_message_str = "\n".join(filter(None, final_followup_parts)).strip()
+
+        try:
+            if final_followup_message_str: 
+                await interaction.followup.send(final_followup_message_str, ephemeral=True)
+        except discord.HTTPException as e: 
+            print(f"   - ⚠️ 无法发送最终关闭票据的 follow-up 给 {user.name}: {e}. 消息是: '{final_followup_message_str}'")
+            if not transcript_dm_sent_to_closer and final_followup_message_str:
+                try:
+                    await user.send(f"关于票据 **#{channel.name}** ({channel.id}) 的关闭状态：\n{final_followup_message_str}")
+                except Exception as dm_fallback_err:
+                    print(f"   - ⚠️ 尝试通过私信发送最终状态给 {user.name} 也失败了: {dm_fallback_err}")
 
 # View for the initial "Create Ticket" button (Persistent)
 class CreateTicketView(ui.View):
+    # ... (这个类的其他部分保持不变) ...
     def __init__(self):
-        # timeout=None 使按钮在机器人重启后仍然有效
-        # 需要在 on_ready 中使用 bot.add_view(CreateTicketView()) 注册
         super().__init__(timeout=None)
 
     @ui.button(label="➡️ 开票-认证", style=discord.ButtonStyle.primary, custom_id="create_verification_ticket")
     async def create_ticket_button(self, interaction: discord.Interaction, button: ui.Button):
+        # ... (这个方法保持不变) ...
         guild = interaction.guild
         user = interaction.user
-        if not guild: return # Should not happen with slash commands
+        if not guild: return 
 
         print(f"[票据] 用户 {user} ({user.id}) 在服务器 {guild.id} 点击了创建票据按钮。")
-        await interaction.response.defer(ephemeral=True) # Acknowledge privately first
+        await interaction.response.defer(ephemeral=True) 
 
-        # --- 检查设置是否完整 ---
         category_id = get_setting(ticket_settings, guild.id, "category_id")
         staff_role_ids = get_setting(ticket_settings, guild.id, "staff_role_ids")
 
@@ -337,18 +622,15 @@ class CreateTicketView(ui.View):
         if not ticket_category or not isinstance(ticket_category, discord.CategoryChannel):
             await interaction.followup.send("❌ 抱歉，配置的票据分类无效或已被删除。请联系管理员。", ephemeral=True)
             print(f"   - 票据创建失败：服务器 {guild.id} 配置的票据分类 ({category_id}) 无效。")
-            # 考虑清除无效设置: set_setting(ticket_settings, guild.id, "category_id", None)
             return
 
         staff_roles = [guild.get_role(role_id) for role_id in staff_role_ids]
-        staff_roles = [role for role in staff_roles if role] # 过滤掉未找到的角色
+        staff_roles = [role for role in staff_roles if role] 
         if not staff_roles:
              await interaction.followup.send("❌ 抱歉，配置的票据员工身份组无效或已被删除。请联系管理员。", ephemeral=True)
              print(f"   - 票据创建失败：服务器 {guild.id} 配置的员工身份组 ({staff_role_ids}) 均无效。")
-             # 考虑清除无效设置: set_setting(ticket_settings, guild.id, "staff_role_ids", [])
              return
 
-        # --- 检查用户是否已有票据 ---
         guild_tickets = open_tickets.setdefault(guild.id, {})
         if user.id in guild_tickets:
             existing_channel_id = guild_tickets[user.id]
@@ -358,58 +640,46 @@ class CreateTicketView(ui.View):
                  print(f"   - 票据创建失败：用户 {user.id} 已有票据频道 {existing_channel_id}")
                  return
             else:
-                 # 如果频道不存在但记录还在，清理记录
                  print(f"   - 清理无效票据记录：用户 {user.id} 的票据频道 {existing_channel_id} 不存在。")
                  del guild_tickets[user.id]
 
-        # --- 检查机器人权限 ---
         bot_perms = ticket_category.permissions_for(guild.me)
         if not bot_perms.manage_channels or not bot_perms.manage_permissions:
              await interaction.followup.send("❌ 创建票据失败：机器人缺少在票据分类中 '管理频道' 或 '管理权限' 的权限。", ephemeral=True)
              print(f"   - 票据创建失败：机器人在分类 {ticket_category.id} 缺少权限。")
              return
 
-        # await interaction.followup.send("⏳ 正在为你创建认证票据...", ephemeral=True) # Already deferred
-
-        # --- 创建票据频道 ---
-        # 获取并增加票据计数器
         ticket_count = get_setting(ticket_settings, guild.id, "ticket_count") or 0
         ticket_count += 1
         set_setting(ticket_settings, guild.id, "ticket_count", ticket_count)
 
-        # 定义权限
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False), # @everyone 不可见
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True), # 创建者权限
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_permissions=True, embed_links=True, read_message_history=True) # 机器人权限
+            guild.default_role: discord.PermissionOverwrite(view_channel=False), 
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True), 
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_permissions=True, embed_links=True, read_message_history=True) 
         }
-        # 添加员工角色权限
         staff_mentions = []
         for role in staff_roles:
-            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True, attach_files=True, embed_links=True) # 员工权限
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True, attach_files=True, embed_links=True)
             staff_mentions.append(role.mention)
         staff_mention_str = " ".join(staff_mentions)
 
-        # 创建频道名称
-        # Sanitize username for channel name
         sanitized_username = "".join(c for c in user.name if c.isalnum() or c in ('-', '_')).lower()
-        if not sanitized_username: sanitized_username = "user" # Fallback if name has no valid chars
-        channel_name = f"认证-{ticket_count:04d}-{sanitized_username}"[:100] # 限制长度
-        new_channel = None # Initialize before try block
+        if not sanitized_username: sanitized_username = "user" 
+        channel_name = f"认证-{ticket_count:04d}-{sanitized_username}"[:100] 
+        new_channel = None 
         try:
             new_channel = await guild.create_text_channel(
                 name=channel_name,
                 category=ticket_category,
                 overwrites=overwrites,
-                topic=f"用户 {user.id} ({user}) 的认证票据 | 创建时间: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", # 在Topic中记录信息
+                topic=f"用户 {user.id} ({user}) 的认证票据 | 创建时间: {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
                 reason=f"用户 {user.name} 创建认证票据"
             )
             print(f"   - 已成功创建票据频道: #{new_channel.name} ({new_channel.id})")
 
-            # 记录打开的票据
             guild_tickets[user.id] = new_channel.id
 
-            # --- 在新频道发送欢迎消息和关闭按钮 ---
             welcome_embed = discord.Embed(
                 title="📝 欢迎进行认证！",
                 description=(
@@ -426,15 +696,13 @@ class CreateTicketView(ui.View):
             )
             welcome_embed.set_footer(text=f"票据 ID: {new_channel.id}")
 
-            await new_channel.send(content=f"{user.mention} {staff_mention_str}", embed=welcome_embed, view=CloseTicketView())
+            await new_channel.send(content=f"{user.mention} {staff_mention_str}", embed=welcome_embed, view=CloseTicketView()) # <--- 注意这里传递的是新实例化的CloseTicketView
 
-            # 编辑给用户的临时消息，告知成功
             await interaction.followup.send(f"✅ 你的认证票据已创建：{new_channel.mention}", ephemeral=True)
 
         except discord.Forbidden:
              await interaction.followup.send("❌ 创建票据失败：机器人权限不足，无法创建频道或设置权限。", ephemeral=True)
              print(f"   - 票据创建失败：机器人在创建频道时权限不足。")
-             # 回滚计数器和记录
              set_setting(ticket_settings, guild.id, "ticket_count", ticket_count - 1)
              if user.id in guild_tickets: del guild_tickets[user.id]
         except discord.HTTPException as http_err:
@@ -447,7 +715,6 @@ class CreateTicketView(ui.View):
             print(f"   - 票据创建失败：未知错误 {e}")
             set_setting(ticket_settings, guild.id, "ticket_count", ticket_count - 1)
             if user.id in guild_tickets: del guild_tickets[user.id]
-            # If channel was somehow created before error, try to delete it
             if new_channel:
                 try: await new_channel.delete(reason="创建过程中出错")
                 except: pass
