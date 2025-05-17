@@ -20,6 +20,7 @@ except ImportError:
 
 import io
 import html
+from collections import deque
 
 
 # --- Configuration ---
