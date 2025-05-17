@@ -41,6 +41,29 @@ DEEPSEEK_MODEL = "deepseek-chat" # <--- 替换为你希望使用的 DeepSeek 模
 
 COMMAND_PREFIX = "!" # 旧版前缀（现在主要使用斜线指令）
 
+# --- 新增：AI 对话功能配置与存储 ---
+# 用于存储被设置为 AI DEP 频道的配置
+# 结构: {channel_id: {"model": "model_id_str", "system_prompt": "optional_system_prompt_str", "history_key": "unique_history_key_for_channel"}}
+ai_dep_channels_config = {} 
+
+# 用于存储所有类型的对话历史 (包括公共 AI 频道、私聊等)
+# 结构: {history_key: deque_object}
+conversation_histories = {} # 注意：这个变量名可能与你之前代码中的不同，确保一致性
+
+# 定义可用于 AI 对话的模型
+AVAILABLE_AI_DIALOGUE_MODELS = {
+    "deepseek-chat": "通用对话模型 (DeepSeek Chat)",
+    "deepseek-coder": "代码生成模型 (DeepSeek Coder)",
+    "deepseek-reasoner": "推理模型 (DeepSeek Reasoner - 支持思维链)"
+}
+DEFAULT_AI_DIALOGUE_MODEL = "deepseek-chat" 
+MAX_AI_HISTORY_TURNS = 10 # AI 对话功能的最大历史轮数 (每轮包含用户和AI的发言)
+
+# 用于追踪用户创建的私聊AI频道
+# 结构: {channel_id: {"user_id": user_id, "model": "model_id", "history_key": "unique_key", "guild_id": guild_id, "channel_id": channel_id}}
+active_private_ai_chats = {} 
+# --- AI 对话功能配置与存储结束 ---
+
 # --- Intents Configuration ---
 # 确保这些也在 Discord 开发者门户中启用了！
 intents = discord.Intents.default()
@@ -153,6 +176,100 @@ async def send_to_public_log(guild: discord.Guild, embed: discord.Embed, log_typ
 
 # --- Helper Function: DeepSeek API Content Check (Returns Chinese Violation Type) ---
 async def check_message_with_deepseek(message_content: str) -> Optional[str]:
+    # ... (check_message_with_deepseek 函数的最后一行) ...
+# except Exception as e:
+#     print(f"❌ 内容审查 DeepSeek 检查期间发生意外错误: {e}") # 修改日志前缀
+#     return None
+# --- (check_message_with_deepseek 函数定义结束) ---
+
+
+# --- 新增：通用的 DeepSeek API 请求函数 (用于AI对话功能) ---
+    async def get_deepseek_dialogue_response(session, api_key, model, messages_for_api, max_tokens_override=None):
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    
+    payload = {"model": model, "messages": messages_for_api}
+    if model == "deepseek-reasoner":
+        if max_tokens_override and isinstance(max_tokens_override, int) and max_tokens_override > 0:
+            payload["max_tokens"] = max_tokens_override 
+    elif max_tokens_override and isinstance(max_tokens_override, int) and max_tokens_override > 0: 
+        payload["max_tokens"] = max_tokens_override
+
+    cleaned_messages_for_api = []
+    for msg in messages_for_api:
+        cleaned_msg = msg.copy() 
+        if "reasoning_content" in cleaned_msg:
+            del cleaned_msg["reasoning_content"]
+        cleaned_messages_for_api.append(cleaned_msg)
+    payload["messages"] = cleaned_messages_for_api
+
+    print(f"[AI DIALOGUE] Requesting: model='{model}', msgs_count={len(cleaned_messages_for_api)}") 
+    if cleaned_messages_for_api: print(f"[AI DIALOGUE] First message for API: {cleaned_messages_for_api[0]}")
+
+    try:
+        async with session.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=300) as response:
+            raw_response_text = await response.text()
+            try: response_data = json.loads(raw_response_text)
+            except json.JSONDecodeError:
+                print(f"[AI DIALOGUE] ERROR: Failed JSON decode. Status: {response.status}. Text: {raw_response_text[:200]}...")
+                return None, None, f"无法解析响应(状态{response.status})"
+
+            if response.status == 200:
+                if response_data.get("choices") and len(response_data["choices"]) > 0:
+                    message_data = response_data["choices"][0].get("message", {})
+                    usage = response_data.get("usage")
+                    
+                    reasoning_content_api = None
+                    final_content_api = message_data.get("content")
+
+                    if model == "deepseek-reasoner":
+                        reasoning_content_api = message_data.get("reasoning_content")
+                        if reasoning_content_api is None: print(f"[AI DIALOGUE] DEBUG: Model '{model}' did not return 'reasoning_content'.")
+                    
+                    display_response = ""
+                    if reasoning_content_api:
+                        display_response += f"🤔 **思考过程:**\n```\n{reasoning_content_api.strip()}\n```\n\n"
+                    
+                    if final_content_api:
+                        prefix = "💬 **最终回答:**\n" if reasoning_content_api else "" 
+                        display_response += f"{prefix}{final_content_api.strip()}"
+                    elif reasoning_content_api and not final_content_api: 
+                        print(f"[AI DIALOGUE] WARNING: Model '{model}' returned reasoning but no final content.")
+                    elif not final_content_api and not reasoning_content_api:
+                        print(f"[AI DIALOGUE] ERROR: API for model '{model}' missing 'content' & 'reasoning_content'. Data: {message_data}")
+                        return None, None, "API返回数据不完整(内容和思考过程均缺失)"
+
+                    if not display_response.strip():
+                        print(f"[AI DIALOGUE] ERROR: Generated 'display_response' is empty for model '{model}'.")
+                        return None, None, "API生成的回复内容为空"
+
+                    print(f"[AI DIALOGUE] INFO: Success for model '{model}'. Usage: {usage}")
+                    return display_response.strip(), final_content_api, None 
+                else:
+                    print(f"[AI DIALOGUE] ERROR: API response missing 'choices' for model '{model}': {response_data}")
+                    return None, None, f"意外响应结构：{response_data}"
+            else:
+                error_detail = response_data.get("error", {}).get("message", f"未知错误(状态{response.status})")
+                print(f"[AI DIALOGUE] ERROR: API error (Status {response.status}) for model '{model}': {error_detail}. Resp: {raw_response_text[:200]}")
+                user_error_msg = f"API调用出错(状态{response.status}): {error_detail}"
+                if response.status == 400:
+                    user_error_msg += "\n(提示:400通常因格式错误或在上下文中传入了`reasoning_content`)"
+                return None, None, user_error_msg
+    except aiohttp.ClientConnectorError as e:
+        print(f"[AI DIALOGUE] ERROR: Network error: {e}")
+        return None, None, "无法连接API"
+    except asyncio.TimeoutError:
+        print("[AI DIALOGUE] ERROR: API request timed out.")
+        return None, None, "API连接超时"
+    except Exception as e:
+        print(f"[AI DIALOGUE] EXCEPTION: Unexpected API call error: {type(e).__name__} - {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None, None, f"未知API错误: {str(e)}"
+# --- (get_deepseek_dialogue_response 函数定义结束) ---
+
+# --- Helper Function: Generate HTML Transcript for Tickets ---
+# async def generate_ticket_transcript_html(channel: discord.TextChannel) -> Optional[str]:
+# ... (接下来的函数定义)
     """使用 DeepSeek API 检查内容。返回中文违规类型或 None。"""
     if not DEEPSEEK_API_KEY:
         # print("DEBUG: DeepSeek API Key 未设置，跳过检查。")
@@ -1794,6 +1911,265 @@ async def slash_ping(interaction: discord.Interaction):
     print(f"[状态] 用户 {interaction.user} 执行了 /ping。WebSocket: {websocket_latency_ms}ms, API: {api_latency_ms}ms")
 # ↑↑↑↑ 新的 ping 指令代码结束 ↑↑↑↑
 
+# ... (在你现有的 /ping 命令或其他独立斜杠命令定义之后) ...
+
+# --- 新增：AI 对话功能指令组 ---
+ai_group = app_commands.Group(name="ai", description="与 DeepSeek AI 交互的指令")
+
+# --- Command: /ai setup_dep_channel ---
+@ai_group.command(name="setup_dep_channel", description="[管理员] 将当前频道或指定频道设置为AI直接对话频道")
+@app_commands.describe(
+    channel="要设置为AI对话的文字频道 (默认为当前频道)",
+    model_id="(可选)为此频道指定AI模型 (默认使用通用对话模型)",
+    system_prompt="(可选)为此频道设置一个系统级提示 (AI会优先考虑)"
+)
+@app_commands.choices(model_id=[
+    app_commands.Choice(name=desc, value=mid) for mid, desc in AVAILABLE_AI_DIALOGUE_MODELS.items()
+])
+@app_commands.checks.has_permissions(manage_guild=True) 
+async def ai_setup_dep_channel(interaction: discord.Interaction, 
+                               channel: Optional[discord.TextChannel] = None, 
+                               model_id: Optional[app_commands.Choice[str]] = None,
+                               system_prompt: Optional[str] = None):
+    target_channel = channel if channel else interaction.channel
+    if not isinstance(target_channel, discord.TextChannel):
+        await interaction.response.send_message("❌ 目标必须是一个文字频道。", ephemeral=True)
+        return
+
+    chosen_model_id = model_id.value if model_id else DEFAULT_AI_DIALOGUE_MODEL
+    
+    history_key_for_channel = f"ai_dep_channel_{target_channel.id}"
+    ai_dep_channels_config[target_channel.id] = {
+        "model": chosen_model_id,
+        "system_prompt": system_prompt,
+        "history_key": history_key_for_channel
+    }
+    if history_key_for_channel not in conversation_histories:
+        conversation_histories[history_key_for_channel] = deque(maxlen=MAX_AI_HISTORY_TURNS * 2) 
+
+    print(f"[AI SETUP] Channel {target_channel.name} ({target_channel.id}) configured for AI. Model: {chosen_model_id}, SysPrompt: {system_prompt is not None}")
+    await interaction.response.send_message(
+        f"✅ 频道 {target_channel.mention} 已成功设置为 AI 直接对话频道！\n"
+        f"- 使用模型: `{chosen_model_id}`\n"
+        f"- 系统提示: `{'已设置' if system_prompt else '未使用'}`\n"
+        f"用户现在可以在此频道直接向 AI提问。",
+        ephemeral=True
+    )
+
+@ai_setup_dep_channel.error
+async def ai_setup_dep_channel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("🚫 你需要“管理服务器”权限才能设置AI频道。", ephemeral=True)
+    else:
+        print(f"[AI SETUP ERROR] /ai setup_dep_channel: {error}")
+        await interaction.response.send_message(f"设置AI频道时发生错误: {type(error).__name__}", ephemeral=True)
+
+# --- Command: /ai clear_dep_history ---
+@ai_group.command(name="clear_dep_history", description="清除当前AI直接对话频道的对话历史")
+async def ai_clear_dep_history(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+    if channel_id not in ai_dep_channels_config:
+        await interaction.response.send_message("❌ 此频道未被设置为 AI 直接对话频道。", ephemeral=True)
+        return
+
+    config = ai_dep_channels_config[channel_id]
+    history_key = config.get("history_key")
+
+    if history_key and history_key in conversation_histories:
+        conversation_histories[history_key].clear()
+        print(f"[AI HISTORY] Cleared history for DEP channel {channel_id} (Key: {history_key}) by {interaction.user.id}")
+        await interaction.response.send_message("✅ 当前 AI 对话频道的历史记录已清除。", ephemeral=False) 
+    else:
+        await interaction.response.send_message("ℹ️ 未找到此频道的历史记录或历史键配置错误。", ephemeral=True)
+
+# --- Command: /ai create_private_chat ---
+@ai_group.command(name="create_private_chat", description="创建一个与AI的私密聊天频道")
+@app_commands.describe(
+    model_id="(可选)为私聊指定AI模型",
+    initial_question="(可选)创建频道后直接向AI提出的第一个问题"
+)
+@app_commands.choices(model_id=[
+    app_commands.Choice(name=desc, value=mid) for mid, desc in AVAILABLE_AI_DIALOGUE_MODELS.items()
+])
+async def ai_create_private_chat(interaction: discord.Interaction, 
+                                 model_id: Optional[app_commands.Choice[str]] = None,
+                                 initial_question: Optional[str] = None):
+    user = interaction.user
+    guild = interaction.guild
+    if not guild: 
+        await interaction.response.send_message("此命令似乎不在服务器中执行。", ephemeral=True)
+        return
+
+    for chat_id_key, chat_info_val in list(active_private_ai_chats.items()): # Iterate over a copy for safe deletion
+        if chat_info_val.get("user_id") == user.id and chat_info_val.get("guild_id") == guild.id:
+            existing_channel = guild.get_channel(chat_info_val.get("channel_id"))
+            if existing_channel:
+                await interaction.response.send_message(f"⚠️ 你已经有一个开启的AI私聊频道：{existing_channel.mention}。\n请先使用 `/ai close_private_chat` 关闭它。", ephemeral=True)
+                return
+            else: 
+                print(f"[AI PRIVATE] Cleaning up stale private chat record for user {user.id}, channel ID {chat_info_val.get('channel_id')}")
+                if chat_info_val.get("history_key") in conversation_histories:
+                    del conversation_histories[chat_info_val.get("history_key")]
+                if chat_id_key in active_private_ai_chats: # chat_id_key is channel_id
+                     del active_private_ai_chats[chat_id_key]
+
+
+    chosen_model_id = model_id.value if model_id else DEFAULT_AI_DIALOGUE_MODEL
+    
+    await interaction.response.defer(ephemeral=True) 
+
+    category_name_config = "AI Private Chats" # Name for the category
+    category = discord.utils.get(guild.categories, name=category_name_config) 
+    if not category:
+        try:
+            bot_member = guild.me
+            bot_perms_in_cat = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True, view_channel=True)
+            everyone_perms_in_cat = discord.PermissionOverwrite(read_messages=False, view_channel=False)
+            category_overwrites = {
+                guild.me: bot_perms_in_cat,
+                guild.default_role: everyone_perms_in_cat
+            }
+            category = await guild.create_category(category_name_config, overwrites=category_overwrites, reason="Category for AI Private Chats")
+            print(f"[AI PRIVATE] Created category '{category_name_config}' in guild {guild.id}")
+        except discord.Forbidden:
+            print(f"[AI PRIVATE ERROR] Failed to create '{category_name_config}' category in {guild.id}: Bot lacks permissions.")
+            await interaction.followup.send("❌ 创建私聊频道失败：机器人无法创建所需分类。请检查机器人是否有“管理频道”权限。", ephemeral=True)
+            return
+        except Exception as e:
+            print(f"[AI PRIVATE ERROR] Error creating category: {e}")
+            await interaction.followup.send(f"❌ 创建私聊频道失败：{e}", ephemeral=True)
+            return
+
+    channel_name = f"ai-{user.name[:20].lower().replace(' ','-')}-{user.id % 1000}" # Ensure lowercase and no spaces for channel name
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, embed_links=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True, manage_messages=True) 
+    }
+
+    new_channel = None # Define before try block
+    try:
+        new_channel = await guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites, topic=f"AI私聊频道，创建者: {user.display_name}, 模型: {chosen_model_id}")
+        
+        history_key_private = f"ai_private_chat_{new_channel.id}"
+        active_private_ai_chats[new_channel.id] = { # Use new_channel.id as the key
+            "user_id": user.id,
+            "model": chosen_model_id,
+            "history_key": history_key_private,
+            "guild_id": guild.id,
+            "channel_id": new_channel.id 
+        }
+        if history_key_private not in conversation_histories:
+            conversation_histories[history_key_private] = deque(maxlen=MAX_AI_HISTORY_TURNS * 2)
+
+        print(f"[AI PRIVATE] Created private AI channel {new_channel.name} ({new_channel.id}) for user {user.id}. Model: {chosen_model_id}")
+        
+        initial_message_content = (
+            f"你好 {user.mention}！这是一个你的专属AI私聊频道。\n"
+            f"- 当前使用模型: `{chosen_model_id}`\n"
+            f"- 直接在此输入你的问题即可与AI对话。\n"
+            f"- 使用 `/ai close_private_chat` 可以关闭此频道。\n"
+            f"Enjoy! ✨"
+        )
+        await new_channel.send(initial_message_content)
+        await interaction.followup.send(f"✅ 你的AI私聊频道已创建：{new_channel.mention}", ephemeral=True)
+
+        if initial_question: 
+            print(f"[AI PRIVATE] Sending initial question from {user.id} to {new_channel.id}: {initial_question}")
+            # Simulate a message object for handle_ai_dialogue
+            # This is a bit hacky, a cleaner way might be to directly call API and format
+            class MinimalMessage:
+                def __init__(self, author, channel, content, guild):
+                    self.author = author
+                    self.channel = channel
+                    self.content = content
+                    self.guild = guild
+                    self.attachments = [] # Assume no attachments for initial question
+                    self.stickers = []  # Assume no stickers
+                    # Add other attributes if your handle_ai_dialogue strict checks them
+                    self.id = discord.utils.time_snowflake(discord.utils.utcnow()) # Fake ID
+                    self.interaction = None # Not from an interaction
+
+            mock_message_obj = MinimalMessage(author=user, channel=new_channel, content=initial_question, guild=guild)
+            async with new_channel.typing():
+                await handle_ai_dialogue(mock_message_obj, is_private_chat=True)
+
+    except discord.Forbidden:
+        print(f"[AI PRIVATE ERROR] Failed to create private channel for {user.id}: Bot lacks permissions.")
+        await interaction.followup.send("❌ 创建私聊频道失败：机器人权限不足。", ephemeral=True)
+        if new_channel and new_channel.id in active_private_ai_chats: # Clean up if entry was made
+            del active_private_ai_chats[new_channel.id]
+    except Exception as e:
+        print(f"[AI PRIVATE ERROR] Error creating private channel: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ 创建私聊频道时发生未知错误: {type(e).__name__}", ephemeral=True)
+        if new_channel and new_channel.id in active_private_ai_chats: # Clean up if entry was made
+            del active_private_ai_chats[new_channel.id]
+
+
+# --- Command: /ai close_private_chat ---
+@ai_group.command(name="close_private_chat", description="关闭你创建的AI私密聊天频道")
+async def ai_close_private_chat(interaction: discord.Interaction):
+    channel = interaction.channel
+    user = interaction.user
+
+    if not (isinstance(channel, discord.TextChannel) and channel.id in active_private_ai_chats):
+        await interaction.response.send_message("❌ 此命令只能在你创建的AI私密聊天频道中使用。", ephemeral=True)
+        return
+
+    chat_info = active_private_ai_chats.get(channel.id)
+    if not chat_info or chat_info.get("user_id") != user.id:
+        await interaction.response.send_message("❌ 你不是此AI私密聊天频道的创建者。", ephemeral=True)
+        return
+
+    # Deferring here might be an issue if channel is deleted quickly
+    # await interaction.response.send_message("⏳ 频道准备关闭...", ephemeral=True) # Ephemeral response
+    
+    history_key_to_clear = chat_info.get("history_key")
+    if history_key_to_clear and history_key_to_clear in conversation_histories:
+        del conversation_histories[history_key_to_clear]
+        print(f"[AI PRIVATE] Cleared history for private chat {channel.id} (Key: {history_key_to_clear}) during closure.")
+    
+    if channel.id in active_private_ai_chats:
+        del active_private_ai_chats[channel.id]
+        print(f"[AI PRIVATE] Removed active private chat entry for channel {channel.id}")
+
+    try:
+        # Send confirmation in channel before deleting
+        await channel.send(f"此AI私密聊天频道由 {user.mention} 请求关闭，将在大约 5 秒后删除。")
+        # Respond to interaction *before* sleep and delete
+        await interaction.response.send_message("频道关闭请求已收到，将在几秒后删除。",ephemeral=True)
+        await asyncio.sleep(5)
+        await channel.delete(reason=f"AI Private Chat closed by owner {user.name}")
+        print(f"[AI PRIVATE] Successfully deleted private AI channel {channel.name} ({channel.id})")
+        try: # Attempt to DM user as a final confirmation
+            await user.send(f"你创建的AI私聊频道 `#{channel.name}` 已成功关闭和删除。")
+        except discord.Forbidden:
+            print(f"[AI PRIVATE] Could not DM user {user.id} about channel closure.")
+    except discord.NotFound:
+        print(f"[AI PRIVATE] Channel {channel.id} already deleted before final action.")
+        if not interaction.response.is_done(): # If we haven't responded yet
+             await interaction.response.send_message("频道似乎已被删除。",ephemeral=True)
+    except discord.Forbidden:
+        print(f"[AI PRIVATE ERROR] Bot lacks permission to delete channel {channel.id} or send messages in it.")
+        if not interaction.response.is_done():
+             await interaction.response.send_message("❌ 关闭频道时出错：机器人权限不足。", ephemeral=True)
+    except Exception as e:
+        print(f"[AI PRIVATE ERROR] Error closing private chat {channel.id}: {e}")
+        if not interaction.response.is_done():
+             await interaction.response.send_message(f"❌ 关闭频道时发生未知错误: {type(e).__name__}", ephemeral=True)
+
+
+# 将新的指令组添加到 bot tree
+# 这个应该在你的 on_ready 或者 setup_hook 中进行一次性添加，或者在文件末尾（如果 bot.tree 已经定义）
+# 为了确保它被添加，我们暂时放在这里，但理想位置是在所有指令定义完后，机器人启动前。
+# 如果你已经在其他地方有 bot.tree.add_command(manage_group) 等，就和它们放在一起。
+# bot.tree.add_command(ai_group) # 我们会在文件末尾统一添加
+
+# --- Management Command Group Definitions ---
+# manage_group = app_commands.Group(...)
+# ... (你现有的 manage_group 指令)
 
 # --- Management Command Group Definitions ---
 manage_group = app_commands.Group(name="管理", description="服务器高级管理相关指令 (需要相应权限)")
@@ -2306,6 +2682,7 @@ async def voice_claim(interaction: discord.Interaction):
 # --- Add the command groups to the bot tree ---
 bot.tree.add_command(manage_group)
 bot.tree.add_command(voice_group)
+bot.tree.add_command(ai_group)
 
 # --- Run the Bot ---
 if __name__ == "__main__":
