@@ -247,10 +247,11 @@ async def check_message_with_deepseek(message_content: str) -> Optional[str]:
         return None
 
 
+    pass
 
 # --- 新增：通用的 DeepSeek API 请求函数 (用于AI对话功能) ---
-    async def get_deepseek_dialogue_response(session, api_key, model, messages_for_api, max_tokens_override=None):
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+async def get_deepseek_dialogue_response(session, api_key, model, messages_for_api, max_tokens_override=None):
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     
     payload = {"model": model, "messages": messages_for_api}
     if model == "deepseek-reasoner":
@@ -330,6 +331,7 @@ async def check_message_with_deepseek(message_content: str) -> Optional[str]:
         import traceback
         traceback.print_exc()
         return None, None, f"未知API错误: {str(e)}"
+
 # --- (get_deepseek_dialogue_response 函数定义结束) ---
 
 # --- Helper Function: Generate HTML Transcript for Tickets ---
@@ -1109,6 +1111,8 @@ async def on_member_join(member: discord.Member):
 # role_manager_bot.py
 
 # ... (在你所有命令定义和辅助函数定义之后，但在 Run the Bot 之前) ...
+
+
 
 # --- 新增：处理 AI 对话的辅助函数 (你之前已经添加了这个，确保它在 on_message 之前) ---
 async def handle_ai_dialogue(message: discord.Message, is_private_chat: bool = False, dep_channel_config: Optional[dict] = None):
