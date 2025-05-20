@@ -1054,10 +1054,10 @@ async def on_member_join(member: discord.Member):
 
     # --- (可选) 发送欢迎消息 ---
     # !!! 重要：将下面的频道 ID 替换为你服务器的实际频道 ID !!!
-    welcome_channel_id = 1280014596765126669      # <--- 替换! 欢迎频道 ID
-    rules_channel_id = 1280026139326283799        # <--- 替换! 规则频道 ID
-    roles_info_channel_id = 1362718781498986497   # <--- 替换! 身份组信息频道 ID
-    verification_channel_id = 1352886274691956756 # <--- 替换! 验证频道 ID (或票据开启频道)
+    welcome_channel_id = 1374384063627923466      # <--- 替换! 欢迎频道 ID
+    rules_channel_id = 1374384733743616020        # <--- 替换! 规则频道 ID
+    roles_info_channel_id = 1374380842024964288   # <--- 替换! 身份组信息频道 ID
+    verification_channel_id = 1374375801323262073 # <--- 替换! 验证频道 ID (或票据开启频道)
 
     # 检查欢迎频道ID是否有效且不是默认示例ID
     if not welcome_channel_id or welcome_channel_id == 123456789012345678:
