@@ -98,6 +98,10 @@ MOD_ALERT_ROLE_IDS = [
 # !!! 重要：替换成你的警告/消除警告公开通知频道ID !!!
 PUBLIC_WARN_LOG_CHANNEL_ID = 1374390176591122582 # <--- 替换! 示例 ID
 
+# !!! 重要：替换成你的启动通知频道ID !!!
+STARTUP_MESSAGE_CHANNEL_ID = 1374372204531159081 # <--- 替换! 示例 ID (例如: 138000000000000000)
+                                # 如果为 0 或未配置，则不发送启动消息
+
 # --- Bad Word Detection Config & Storage (In-Memory) ---
 # !!! 【警告】仔细审查并【大幅删减】此列表，避免误判 !!!
 # !!! 如果你完全信任 DeepSeek API 的判断，可以清空或注释掉这个列表 !!!
@@ -1019,6 +1023,62 @@ async def on_ready():
     print('------')
     # 设置机器人状态
     await bot.change_presence(activity=discord.Game(name="/help 显示帮助"))
+
+    # --- 发送启动通知 ---
+    if STARTUP_MESSAGE_CHANNEL_ID and STARTUP_MESSAGE_CHANNEL_ID != 0: # Check if configured and not placeholder
+        startup_channel = None
+        # Try to find the channel in any guild the bot is in
+        for guild in bot.guilds:
+            channel = guild.get_channel(STARTUP_MESSAGE_CHANNEL_ID)
+            if channel and isinstance(channel, discord.TextChannel):
+                startup_channel = channel
+                break
+        
+        if startup_channel:
+            bot_perms = startup_channel.permissions_for(startup_channel.guild.me)
+            if bot_perms.send_messages and bot_perms.embed_links:
+                features_list = [
+                    "深度内容审查 (DeepSeek AI)",
+                    "本地违禁词检测与自动警告",
+                    "用户刷屏行为监测与自动警告/踢出",
+                    "机器人刷屏行为监测",
+                    "临时语音频道自动管理",
+                    "票据系统支持",
+                    "机器人白名单与自动踢出 (未授权Bot)",
+                    "所有可疑行为将被记录并通知管理员"
+                ]
+                features_text = "\n".join([f"- {feature}" for feature in features_list])
+
+                embed = discord.Embed(
+                    title="🚨 GJ Team 高级监控系统已激活 🚨",
+                    description=(
+                        f"**本服务器由 {bot.user.name} 全天候监控中。**\n\n"
+                        "系统已成功启动并加载以下模块：\n"
+                        f"{features_text}\n\n"
+                        "**请各位用户自觉遵守服务器规定，共同维护良好环境。**\n"
+                        "任何违规行为都可能导致自动警告、禁言、踢出乃至封禁处理。\n"
+                        "**所有操作均有详细日志记录。**"
+                    ),
+                    color=discord.Color.dark_red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                if bot.user.avatar:
+                    embed.set_thumbnail(url=bot.user.display_avatar.url)
+                embed.set_footer(text="请谨慎发言 | Behave yourselves!")
+                try:
+                    await startup_channel.send(embed=embed)
+                    print(f"✅ 已成功发送启动通知到频道 #{startup_channel.name} ({startup_channel.id})")
+                except discord.Forbidden:
+                    print(f"❌ 发送启动通知失败：机器人缺少在频道 {STARTUP_MESSAGE_CHANNEL_ID} 发送消息或嵌入链接的权限。")
+                except Exception as e:
+                    print(f"❌ 发送启动通知时发生错误: {e}")
+            else:
+                print(f"❌ 发送启动通知失败：机器人在频道 {STARTUP_MESSAGE_CHANNEL_ID} 缺少发送消息或嵌入链接的权限。")
+        else:
+            print(f"⚠️ 未找到用于发送启动通知的频道 ID: {STARTUP_MESSAGE_CHANNEL_ID}。请检查配置。")
+    elif STARTUP_MESSAGE_CHANNEL_ID == 0: # Explicitly 0 means don't send
+        print(f"ℹ️ STARTUP_MESSAGE_CHANNEL_ID 设置为0，跳过发送启动通知。")
+    # --- 启动通知结束 ---
 
 # 初始化持久化视图标志
 bot.persistent_views_added = False
