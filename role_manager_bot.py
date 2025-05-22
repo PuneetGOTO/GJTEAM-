@@ -463,7 +463,8 @@ async def generate_ticket_transcript_html(channel: discord.TextChannel) -> Optio
                 if embed.title:
                     embed_str += f'<div class="embed-title">{html.escape(embed.title)}</div>'
                 if embed.description:
-                    embed_str += f'<div class="embed-description">{html.escape(embed.description).replace("\n", "<br>")}</div>'
+                    escaped_description = html.escape(embed.description).replace("\n", "<br>")
+                    embed_str += f'<div class="embed-description">{escaped_description}</div>'
                 
                 fields_html = ""
                 if embed.fields:
