@@ -302,7 +302,11 @@ class GuildMusicState:
             error_message = f"❌ 播放时发生下载错误 ({song_title_debug}): {str(e_dl)[:300]}"
             print(f"[{guild_name_debug}] {error_message}")
             channel_to_reply = interaction_for_reply.channel if interaction_for_reply else getattr(self.voice_client, 'last_text_channel', None)
-            if channel_to_reply: try: await channel_to_reply.send(error_message, delete_after=20)
+                        if channel_to_reply:
+                try: 
+                    await channel_to_reply.send(error_message, delete_after=20)
+                except: # 最好捕获更具体的异常，但至少需要一个 except 子句
+                    pass 
             except: pass
             if self.queue: await self.play_next_song_async(interaction_for_reply)
             else: self._schedule_leave()
