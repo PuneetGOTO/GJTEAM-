@@ -3,3 +3,4 @@ requests
 python-dotenv
 redis
 aiohttp
+discord.py[voice]
