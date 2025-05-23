@@ -7,9 +7,29 @@ import yt_dlp
 from collections import deque
 import re
 from typing import Optional, List, Dict, Any, Union # Added more specific types
+import os # For checking cookie file existence
 
 # Suppress noise about console usage from errors
+# Updated lambda to accept arbitrary arguments
 yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
+
+# --- IMPORTANT: YouTube Cookies ---
+# To potentially bypass YouTube's "Sign in to confirm you’re not a bot" errors,
+# you need to provide a cookies file.
+# 1. Install a browser extension like "Get cookies.txt" or "cookies.txt".
+# 2. Log in to YouTube in your browser.
+# 3. Use the extension to export your YouTube cookies as "youtube-cookies.txt".
+# 4. Place this "youtube-cookies.txt" file in the SAME DIRECTORY as this script (music_cog.py)
+#    OR in the root directory where your main bot script (role_manager_bot.py) is run.
+#    If the file is not found, yt-dlp will proceed without cookies.
+#
+# It's recommended to use a dedicated YouTube account for this if possible,
+# as your personal account's cookies will be used.
+# Keep the cookie file secure and do not share it.
+# Cookies can expire, so you might need to re-export them periodically.
+# ---
+
+COOKIE_FILE_PATH = "youtube-cookies.txt" # Or an absolute path if preferred
 
 YTDL_FORMAT_OPTIONS = {
     'format': 'bestaudio/best',
@@ -23,7 +43,17 @@ YTDL_FORMAT_OPTIONS = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
+    # Add cookiefile option
+    'cookiefile': COOKIE_FILE_PATH if os.path.exists(COOKIE_FILE_PATH) else None,
 }
+
+# Check if cookie file exists and print a message
+if YTDL_FORMAT_OPTIONS['cookiefile']:
+    print(f"ℹ️ [MusicCog] Using cookies from: {COOKIE_FILE_PATH}")
+else:
+    print(f"⚠️ [MusicCog] Cookie file '{COOKIE_FILE_PATH}' not found. YouTube downloads may be restricted.")
+    print(f"   Please see instructions in music_cog.py for setting up YouTube cookies.")
+
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
@@ -47,6 +77,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
         loop = loop or asyncio.get_event_loop()
         
         current_ytdl_opts = YTDL_FORMAT_OPTIONS.copy()
+        # Update cookiefile path for this specific instance as well
+        current_ytdl_opts['cookiefile'] = COOKIE_FILE_PATH if os.path.exists(COOKIE_FILE_PATH) else None
+
         if playlist:
             current_ytdl_opts['noplaylist'] = False
             current_ytdl_opts['extract_flat'] = 'discard_in_playlist'
@@ -107,9 +140,16 @@ class YTDLSource(discord.PCMVolumeTransformer):
         spotify_album_match = re.match(r"https?://open\.spotify\.com/(?:intl-\w+/)?album/(\w+)", url)
         search_query = None
 
+        # Ensure ytdl instance used for Spotify also respects cookie settings
+        # Create a temporary ytdl instance with current cookie settings for Spotify processing
+        spotify_ytdl_opts = YTDL_FORMAT_OPTIONS.copy()
+        spotify_ytdl_opts['cookiefile'] = COOKIE_FILE_PATH if os.path.exists(COOKIE_FILE_PATH) else None
+        current_ytdl_for_spotify = yt_dlp.YoutubeDL(spotify_ytdl_opts)
+
+
         try:
             if spotify_track_match:
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+                data = await loop.run_in_executor(None, lambda: current_ytdl_for_spotify.extract_info(url, download=False))
                 if 'entries' in data: data = data['entries'][0]
                 if data.get('title') and data.get('url'): return cls(discord.FFmpegPCMAudio(data['url'], **FFMPEG_OPTIONS), data=data)
                 title = data.get('track') or data.get('title'); artist = data.get('artist') or data.get('uploader')
@@ -119,6 +159,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             
             elif spotify_playlist_match or spotify_album_match:
                 playlist_ytdl_opts = {**YTDL_FORMAT_OPTIONS, 'noplaylist': False, 'extract_flat': 'discard_in_playlist', 'playlistend': 20}
+                playlist_ytdl_opts['cookiefile'] = COOKIE_FILE_PATH if os.path.exists(COOKIE_FILE_PATH) else None
                 custom_ytdl = yt_dlp.YoutubeDL(playlist_ytdl_opts)
                 data = await loop.run_in_executor(None, lambda: custom_ytdl.extract_info(url, download=False))
                 if 'entries' in data:
@@ -139,9 +180,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
         except yt_dlp.utils.DownloadError as e:
             print(f"处理Spotify链接 '{url}' 时 yt-dlp 发生错误: {e}")
             if "This playlist is private or unavailable" in str(e): return "private_playlist"
-            # Basic scraping fallback is highly unreliable and removed for stability.
-            # If you need it, ensure 'requests' and 'beautifulsoup4' are in requirements.txt
-            # and uncomment the relevant import and try-except block.
             print(f"Spotify解析失败 '{url}', 且未启用备用抓取。")
             return None
         except Exception as e:
@@ -301,11 +339,8 @@ class GuildMusicState:
             error_message = f"❌ 播放时发生未知错误 ({song_title_debug}): {type(e_generic).__name__} - {str(e_generic)[:200]}"
             print(f"[{guild_name}] {error_message}")
             import traceback; traceback.print_exc()
-            # 第 304 行开始
-            channel_to_reply_id = (
-                interaction_for_reply.channel.id if interaction_for_reply and interaction_for_reply.channel
-                else original_interaction_channel_id
-            ) # 第 306 行 (新行)
+            channel_to_reply_id = (interaction_for_reply.channel.id if interaction_for_reply and interaction_for_reply.channel 
+                                   else original_interaction_channel_id)
             if channel_to_reply_id and self.bot_loop:
                 bot_instance = getattr(self.bot_loop, '_bot_instance_for_music_cog', None)
                 if bot_instance:
@@ -318,7 +353,6 @@ class GuildMusicState:
             else: self._schedule_leave()
 
     def create_now_playing_embed(self) -> discord.Embed:
-        # ... (Implementation is the same as before, ensure no syntax errors) ...
         if not self.current_song: return discord.Embed(title="当前没有播放歌曲", color=discord.Color.greyple())
         embed = discord.Embed(title="🎶 正在播放", description=f"[{self.current_song.title}]({self.current_song.url})", color=discord.Color.random())
         if self.current_song.uploader: embed.set_author(name=self.current_song.uploader)
@@ -337,7 +371,6 @@ class GuildMusicState:
 
 
     def create_music_controls_view(self) -> ui.View:
-        # ... (Implementation is the same, but ensure all callbacks correctly get 'state' via MusicCog._guild_states_ref) ...
         view = ui.View(timeout=None)
         guild_id_for_custom_id = self.voice_client.guild.id if self.voice_client and self.voice_client.guild else 'global_music_controls' # Fallback for custom_id
 
@@ -374,16 +407,15 @@ class GuildMusicState:
             elif state.loop_mode == "song": state.loop_mode = "queue"
             else: state.loop_mode = "none" # Cycle back to "none"
             
-            # Update the button in the view object before editing the message
             for item in view.children:
-                if isinstance(item, ui.Button) and item.custom_id == f"music_loop_{guild_id_for_custom_id}": # Match by custom_id
+                if isinstance(item, ui.Button) and item.custom_id == f"music_loop_{guild_id_for_custom_id}": 
                     item.label = f"循环: {state.loop_mode.capitalize()}"
                     break
-            await interaction.response.edit_message(view=view) # This should now reflect the new label
+            await interaction.response.edit_message(view=view) 
             await interaction.followup.send(f"🔁 循环模式已设为: **{state.loop_mode.capitalize()}**", ephemeral=True, delete_after=7)
             if state.now_playing_message and state.current_song: 
                 try: await state.now_playing_message.edit(embed=state.create_now_playing_embed(), view=view)
-                except: pass # Ignore if message gone
+                except: pass 
         loop_button.callback = loop_callback; view.add_item(loop_button)
         return view
 
@@ -392,8 +424,6 @@ class MusicCog(commands.Cog, name="音乐播放"):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Pass the bot instance to GuildMusicState if needed for get_channel
-        # A bit hacky, but works for now. Better would be to pass bot to GuildMusicState methods.
         bot.loop._bot_instance_for_music_cog = bot 
         MusicCog._guild_states_ref = {}
 
@@ -403,7 +433,6 @@ class MusicCog(commands.Cog, name="音乐播放"):
         return MusicCog._guild_states_ref[guild_id]
 
     async def ensure_voice(self, interaction: discord.Interaction, state: GuildMusicState) -> bool:
-        # ... (Implementation mostly the same, ensure all followups are ephemeral=True) ...
         if not interaction.user.voice: await interaction.followup.send(" 你需要先连接到一个语音频道。", ephemeral=True); return False
         user_vc = interaction.user.voice.channel
         bot_perms = user_vc.permissions_for(interaction.guild.me)
@@ -428,25 +457,20 @@ class MusicCog(commands.Cog, name="音乐播放"):
 
     @music_group.command(name="leave", description="让机器人离开语音频道并清空队列。")
     async def leave_cmd(self, interaction: discord.Interaction):
-        # ... (Implementation is the same) ...
         await interaction.response.defer(ephemeral=True); state = self.get_guild_state(interaction.guild_id)
         guild_name_debug_leave = interaction.guild.name if interaction.guild else "未知服务器"
         if state.voice_client and state.voice_client.is_connected():
             state.queue.clear(); state.current_song = None; state.loop_mode = "none"
             if state.voice_client.is_playing(): state.voice_client.stop()
-            await state.voice_client.disconnect(); state.voice_client = None # Critical to set to None
-            # 在 leave_cmd 方法内部
+            await state.voice_client.disconnect(); state.voice_client = None 
             if state.now_playing_message:
                 try:
                     await state.now_playing_message.delete()
                 except discord.NotFound:
-                    # 消息已经被删除了，是正常情况
                     pass
                 except Exception as e_del_np_leave:
-                    # 获取服务器名称用于调试打印
                     guild_name_debug = interaction.guild.name if interaction.guild else "未知服务器"
                     print(f"[{guild_name_debug}] Leave命令删除NP消息时出错: {e_del_np_leave}")
-                # 无论删除成功与否，或是否找到，都将引用设为 None
                 state.now_playing_message = None
             await interaction.followup.send("👋 已离开语音频道并清空队列。", ephemeral=True)
             print(f"[{guild_name_debug_leave}] 用户 {interaction.user.name} 执行 /leave。")
@@ -457,22 +481,21 @@ class MusicCog(commands.Cog, name="音乐播放"):
     @music_group.command(name="play", description="播放歌曲或添加到队列 (YouTube/Spotify/SoundCloud)。")
     @app_commands.describe(query="输入YouTube/Spotify/SoundCloud链接或歌曲名称搜索。")
     async def play_cmd(self, interaction: discord.Interaction, query: str):
-        # ... (Implementation is the same, ensure all followups are ephemeral=True before NP message) ...
-        await interaction.response.defer(ephemeral=False) # NP message is public
+        await interaction.response.defer(ephemeral=False) 
         state = self.get_guild_state(interaction.guild_id)
         guild_name_debug_play = interaction.guild.name if interaction.guild else "UnknownGuild"
         if not await self.ensure_voice(interaction, state): return
 
-        state.last_interaction_channel_id = interaction.channel.id # Store channel for NP messages
+        state.last_interaction_channel_id = interaction.channel.id 
 
         is_spotify_url = "open.spotify.com" in query.lower()
         is_youtube_playlist = ("youtube.com/playlist?" in query) or ("youtu.be/playlist?" in query)
         is_soundcloud_url = "soundcloud.com/" in query.lower()
         songs_to_add_data: List[Dict[str, Any]] = []; source_or_list_of_data: Union[YTDLSource, List[Dict[str, Any]], str, None] = None
         initial_feedback_sent = False
+        pre_message = None # Initialize pre_message
         
         try:
-            # Send a thinking message if processing might take time
             pre_message = await interaction.followup.send(f"⚙️ 正在处理查询: `{query[:70]}...`", ephemeral=True, wait=True)
             
             if is_spotify_url: source_or_list_of_data = await YTDLSource.from_spotify(query, loop=self.bot.loop)
@@ -491,26 +514,25 @@ class MusicCog(commands.Cog, name="音乐播放"):
             for song_data_dict in songs_to_add_data: state.queue.append(song_data_dict)
             
             feedback_msg = f"✅ 已将 **{songs_to_add_data[0].get('title', '歌曲') if len(songs_to_add_data) == 1 else f'{len(songs_to_add_data)} 首歌'}** 添加到队列。"
-            await pre_message.edit(content=feedback_msg) # Edit the "thinking" message
-            initial_feedback_sent = True # Mark that ephemeral feedback was given
+            await pre_message.edit(content=feedback_msg) 
+            initial_feedback_sent = True 
 
         except yt_dlp.utils.DownloadError as e_dl_play: 
-            if not initial_feedback_sent and 'pre_message' in locals() and pre_message: await pre_message.edit(content=f"❌ 处理查询时发生下载错误: `{str(e_dl_play)[:300]}`。\n内容可能不可用或受地区限制。")
+            if pre_message: await pre_message.edit(content=f"❌ 处理查询时发生下载错误: `{str(e_dl_play)[:300]}`。\n内容可能不可用或受地区限制。")
             elif not initial_feedback_sent: await interaction.followup.send(f"❌ 处理查询时发生下载错误: `{str(e_dl_play)[:300]}`", ephemeral=True)
             return
         except Exception as e_play_generic:
             print(f"[{guild_name_debug_play}] /play 命令执行出错: {type(e_play_generic).__name__} - {e_play_generic}")
             import traceback; traceback.print_exc()
-            if not initial_feedback_sent and 'pre_message' in locals() and pre_message: await pre_message.edit(content=f"❌ 发生未知错误: {type(e_play_generic).__name__}。请检查日志。")
+            if pre_message: await pre_message.edit(content=f"❌ 发生未知错误: {type(e_play_generic).__name__}。请检查日志。")
             elif not initial_feedback_sent: await interaction.followup.send(f"❌ 发生未知错误: {type(e_play_generic).__name__}。", ephemeral=True)
             return
 
         if not state.voice_client.is_playing() and not state.current_song: 
-            await state.play_next_song_async(interaction if not initial_feedback_sent else None) # Pass interaction only if no ephemeral feedback yet
+            await state.play_next_song_async(interaction if not initial_feedback_sent else None) 
 
     @music_group.command(name="skip", description="跳过当前播放的歌曲。")
     async def skip_cmd(self, interaction: discord.Interaction):
-        # ... (Implementation is the same) ...
         await interaction.response.defer(ephemeral=True); state = self.get_guild_state(interaction.guild_id)
         if not interaction.user.voice or not state.voice_client or interaction.user.voice.channel != state.voice_client.channel: await interaction.followup.send("🚫 你需要和机器人在同一个语音频道才能跳歌。", ephemeral=True); return
         if state.voice_client and state.voice_client.is_playing() and state.current_song: state.voice_client.stop(); await interaction.followup.send("⏭️ 已跳过当前歌曲。", ephemeral=True)
@@ -534,19 +556,18 @@ class MusicCog(commands.Cog, name="音乐播放"):
             if state.voice_client.is_playing():
                 state.voice_client.stop()
             
-            # 先尝试删除消息，再断开连接
             if state.now_playing_message:
                 try:
                     await state.now_playing_message.delete()
                 except discord.NotFound:
-                    pass # 消息已删除
+                    pass 
                 except Exception as e_del_np_stop:
                     print(f"[{guild_name_debug_stop}] stop_cmd 删除NP消息时出错: {e_del_np_stop}")
-                finally: # 无论如何都清除引用
+                finally: 
                     state.now_playing_message = None
             
             await state.voice_client.disconnect()
-            state.voice_client = None # 在disconnect后设置
+            state.voice_client = None 
 
             await interaction.followup.send("⏹️ 播放已停止，队列已清空，机器人已离开频道。", ephemeral=True)
             print(f"[{guild_name_debug_stop}] 用户 {interaction.user.name} 执行 /stop。")
@@ -559,7 +580,6 @@ class MusicCog(commands.Cog, name="音乐播放"):
 
     @music_group.command(name="queue", description="显示当前的歌曲队列。")
     async def queue_cmd(self, interaction: discord.Interaction):
-        # ... (Implementation mostly the same, ensure variable names are unique if needed) ...
         await interaction.response.defer(ephemeral=True); state = self.get_guild_state(interaction.guild_id)
         if not state.queue and not state.current_song: await interaction.followup.send(" 队列是空的，当前也没有歌曲在播放。", ephemeral=True); return
         embed = discord.Embed(title="🎵 歌曲队列", color=discord.Color.purple()); queue_display_limit = 10; description_lines = []
@@ -569,8 +589,8 @@ class MusicCog(commands.Cog, name="音乐播放"):
             else: description_lines.append("队列是空的。")
         else:
             description_lines.append("\n**等待播放:**")
-            for i, song_data_item in enumerate(list(state.queue)[:queue_display_limit]): # Changed variable name
-                title_item = song_data_item.get('title', '未知标题') # Changed variable name
+            for i, song_data_item in enumerate(list(state.queue)[:queue_display_limit]): 
+                title_item = song_data_item.get('title', '未知标题') 
                 if len(title_item) > 60: title_item = title_item[:57] + "..."
                 description_lines.append(f"{i+1}. {title_item}")
             if len(state.queue) > queue_display_limit: description_lines.append(f"\n...还有 **{len(state.queue) - queue_display_limit}** 首歌在队列中。")
@@ -579,16 +599,15 @@ class MusicCog(commands.Cog, name="音乐播放"):
 
     @music_group.command(name="nowplaying", description="显示当前正在播放的歌曲信息。")
     async def nowplaying_cmd(self, interaction: discord.Interaction):
-        # ... (Implementation mostly the same, ensure channel for NP is correct) ...
         await interaction.response.defer(ephemeral=False); state = self.get_guild_state(interaction.guild_id)
-        if state.voice_client: state.last_interaction_channel_id = interaction.channel.id # Update last channel
+        if state.voice_client: state.last_interaction_channel_id = interaction.channel.id 
 
         if state.current_song and state.voice_client and state.voice_client.is_playing():
             if state.now_playing_message: 
                 try: 
                     if state.now_playing_message.channel.id == interaction.channel.id: await state.now_playing_message.delete()
-                except: pass # Ignore errors
-                state.now_playing_message = None # Clear old reference
+                except: pass 
+                state.now_playing_message = None 
             embed = state.create_now_playing_embed(); view = state.create_music_controls_view()
             state.now_playing_message = await interaction.followup.send(embed=embed, view=view, wait=True)
         else: await interaction.followup.send(" 当前没有歌曲在播放。", ephemeral=True)
@@ -596,7 +615,6 @@ class MusicCog(commands.Cog, name="音乐播放"):
     @music_group.command(name="volume", description="设置音乐播放音量 (0-150)。")
     @app_commands.describe(level="音量大小 (0-150，默认为30)。")
     async def volume_cmd(self, interaction: discord.Interaction, level: app_commands.Range[int, 0, 150]):
-        # ... (Implementation is the same) ...
         await interaction.response.defer(ephemeral=True); state = self.get_guild_state(interaction.guild_id)
         if not state.voice_client or not state.voice_client.is_connected(): await interaction.followup.send(" 我需要先连接到语音频道才能调节音量。", ephemeral=True); return
         if not interaction.user.voice or state.voice_client.channel != interaction.user.voice.channel: await interaction.followup.send(" 你需要和我在同一个语音频道才能调节音量。", ephemeral=True); return
@@ -611,7 +629,6 @@ class MusicCog(commands.Cog, name="音乐播放"):
     @music_group.command(name="loop", description="设置播放循环模式。")
     @app_commands.choices(mode=[ app_commands.Choice(name="关闭循环", value="none"), app_commands.Choice(name="单曲循环", value="song"), app_commands.Choice(name="队列循环", value="queue"), ])
     async def loop_cmd(self, interaction: discord.Interaction, mode: app_commands.Choice[str]):
-        # ... (Implementation is the same) ...
         await interaction.response.defer(ephemeral=True); state = self.get_guild_state(interaction.guild_id)
         if not interaction.user.voice or not state.voice_client or interaction.user.voice.channel != state.voice_client.channel: await interaction.followup.send("🚫 你需要和机器人在同一个语音频道才能设置循环模式。", ephemeral=True); return
         state.loop_mode = mode.value; await interaction.followup.send(f"🔁 循环模式已设置为 **{mode.name}**。", ephemeral=True)
@@ -623,24 +640,22 @@ class MusicCog(commands.Cog, name="音乐播放"):
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         guild_name_listener = member.guild.name if member.guild else "未知服务器"
         if member.id == self.bot.user.id:
-            if before.channel and not after.channel: # Bot left a voice channel
+            if before.channel and not after.channel: 
                 state = MusicCog._guild_states_ref.pop(member.guild.id, None)
                 if state:
                     if state.now_playing_message:
                         try:
                             await state.now_playing_message.delete()
                         except discord.NotFound:
-                            pass # Message already deleted
+                            pass 
                         except Exception as e_del_np_bot_disconnect:
                             print(f"[{guild_name_listener}] on_voice_state_update (bot disconnect) 删除NP消息时出错: {e_del_np_bot_disconnect}")
-                        # state.now_playing_message = None # 不需要，因为 state 对象本身被 pop 了
                     
                     if state.leave_task:
                         state.leave_task.cancel()
                     print(f"机器人已从 {guild_name_listener} 的语音频道断开，音乐状态已清理。")
-            return # Important: return after handling bot's own state change
+            return 
         
-        # ... (处理其他用户语音状态变化的代码保持不变) ...
         state = MusicCog._guild_states_ref.get(member.guild.id)
         if not state or not state.voice_client or not state.voice_client.is_connected(): return
         bot_vc = state.voice_client.channel
@@ -655,12 +670,6 @@ class MusicCog(commands.Cog, name="音乐播放"):
 async def setup(bot: commands.Bot):
     music_cog_instance = MusicCog(bot)
     await bot.add_cog(music_cog_instance)
-    # Ensure the command group is added to the tree if not already handled by @app_commands.Group
-    # If MusicCog.music_group is an app_commands.Group, it's typically added automatically
-    # when the cog is loaded if the group is part of the class definition.
-    # However, explicitly adding it here ensures it if it's a separate instance.
-    # Check if it's already added to prevent errors, or rely on discord.py's handling.
-    # For safety and clarity, if music_group is defined as an instance variable in MusicCog:
     if not any(cmd.name == music_cog_instance.music_group.name for cmd in bot.tree.get_commands()):
          bot.tree.add_command(music_cog_instance.music_group)
          print("Music 指令组已显式添加到tree。")
