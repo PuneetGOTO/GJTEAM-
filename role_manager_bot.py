@@ -21,6 +21,7 @@ except ImportError:
 import io
 import html
 from collections import deque
+import sys
 
 
 # --- Configuration ---
@@ -30,6 +31,11 @@ if not BOT_TOKEN:
     print("❌ 致命错误：未设置 DISCORD_BOT_TOKEN 环境变量。")
     print("   请在你的托管环境（例如 Railway Variables）中设置此变量。")
     exit()
+
+# !!! 重要：从环境变量加载重启密码 !!!
+RESTART_PASSWORD = os.environ.get("BOT_RESTART_PASSWORD")
+if not RESTART_PASSWORD:
+    print("⚠️ 警告：未设置 BOT_RESTART_PASSWORD 环境变量。/管理 restart 指令将不可用。")
 
 # !!! 重要：从环境变量加载 DeepSeek API Key !!!
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
@@ -2824,6 +2830,84 @@ async def manage_kick(interaction: discord.Interaction, user: discord.Member, re
         await send_to_public_log(guild, log_embed, log_type="Kick Member")
     except discord.Forbidden: await interaction.followup.send(f"⚙️ 踢出用户 {user.mention} 失败：机器人权限不足或层级不够。", ephemeral=True)
     except Exception as e: print(f"执行 /管理 踢出 时出错: {e}"); await interaction.followup.send(f"⚙️ 踢出用户 {user.mention} 时发生未知错误: {e}", ephemeral=True)
+
+    # --- 新增：重启机器人指令 ---
+@manage_group.command(name="restart", description="[服主专用] 重启机器人 (需要密码)。")
+@app_commands.describe(password="重启机器人所需的密码。")
+async def manage_restart_bot(interaction: discord.Interaction, password: str):
+    # 确保只有服务器所有者能执行
+    if interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message("🚫 只有服务器所有者才能重启机器人。", ephemeral=True)
+        return
+
+    if not RESTART_PASSWORD:
+        await interaction.response.send_message("⚙️ 重启功能未配置密码，无法执行。", ephemeral=True)
+        print("⚠️ /管理 restart: RESTART_PASSWORD 未设置，无法执行。")
+        return
+
+    if password == RESTART_PASSWORD:
+        await interaction.response.send_message("✅ 收到重启指令。机器人将尝试关闭并等待外部进程重启...", ephemeral=True)
+        print(f"机器人重启由 {interaction.user.name} ({interaction.user.id}) 发起。")
+
+        # 准备日志 Embed
+        log_embed_restart = discord.Embed(title="🤖 机器人重启中...",
+                                  description=f"由 {interaction.user.mention} 发起。\n机器人将很快关闭，请等待外部服务（如systemd）自动重启。",
+                                  color=discord.Color.orange(),
+                                  timestamp=discord.utils.utcnow())
+        if bot.user.avatar:
+            log_embed_restart.set_thumbnail(url=bot.user.display_avatar.url)
+
+        # 尝试发送重启通知到日志频道
+        # 你可以使用 send_to_public_log 函数，或者直接发送到一个指定的频道
+        # 为了简单起见，并且 send_to_public_log 依赖 PUBLIC_WARN_LOG_CHANNEL_ID，我们这里直接尝试发送
+        # 你可以根据需要调整这里的日志发送逻辑
+        log_channel_for_restart_notice = None
+        # 优先使用 STARTUP_MESSAGE_CHANNEL_ID，因为它更可能是机器人状态通知的地方
+        if STARTUP_MESSAGE_CHANNEL_ID and STARTUP_MESSAGE_CHANNEL_ID != 0: # 确保已配置且不是占位符
+            channel_obj = bot.get_channel(STARTUP_MESSAGE_CHANNEL_ID)
+            if channel_obj and isinstance(channel_obj, discord.TextChannel):
+                log_channel_for_restart_notice = channel_obj
+        
+        # 如果启动频道无效或未配置，尝试公共日志频道
+        if not log_channel_for_restart_notice and PUBLIC_WARN_LOG_CHANNEL_ID:
+             # 确保 PUBLIC_WARN_LOG_CHANNEL_ID 不是你之前用作示例的ID (1374390176591122582)
+             # 更好的做法是，如果这个ID在你的 .env 中被正确设置了，这里就不需要这个特定数字的检查
+             # 假设 PUBLIC_WARN_LOG_CHANNEL_ID 是从 .env 正确读取的
+             if PUBLIC_WARN_LOG_CHANNEL_ID != 1374390176591122582: # 移除或调整此硬编码检查
+                channel_obj = bot.get_channel(PUBLIC_WARN_LOG_CHANNEL_ID)
+                if channel_obj and isinstance(channel_obj, discord.TextChannel):
+                    log_channel_for_restart_notice = channel_obj
+
+        if log_channel_for_restart_notice:
+            try:
+                # 检查机器人是否有权限在目标频道发送消息和嵌入
+                bot_member_for_perms = log_channel_for_restart_notice.guild.me
+                if log_channel_for_restart_notice.permissions_for(bot_member_for_perms).send_messages and \
+                   log_channel_for_restart_notice.permissions_for(bot_member_for_perms).embed_links:
+                    await log_channel_for_restart_notice.send(embed=log_embed_restart)
+                    print(f"  - 已发送重启通知到频道 #{log_channel_for_restart_notice.name}")
+                else:
+                    print(f"  - 发送重启通知到频道 #{log_channel_for_restart_notice.name} 失败：缺少发送或嵌入权限。")
+            except discord.Forbidden:
+                print(f"  - 发送重启通知到频道 #{log_channel_for_restart_notice.name} 失败：权限不足。")
+            except Exception as e_log_send:
+                print(f"  - 发送重启通知到频道时发生错误: {e_log_send}")
+        else:
+            print("  - 未找到合适的频道发送重启通知。")
+
+
+        await bot.change_presence(status=discord.Status.invisible) # 可选：表示正在关闭
+        # 清理 aiohttp 会话 (如果存在)
+        if hasattr(bot, 'http_session') and bot.http_session and not bot.http_session.closed:
+            await bot.http_session.close()
+            print("  - aiohttp 会话已关闭。")
+        
+        await bot.close() # 优雅地关闭与 Discord 的连接
+        print("机器人正在关闭以进行重启... 请确保你的托管服务 (如 systemd) 会自动重启脚本。")
+        sys.exit(0) # 0 表示成功退出，systemd (如果配置为 Restart=always) 会重启它
+    else:
+        await interaction.response.send_message("❌ 密码错误，重启取消。", ephemeral=True)
+        print(f"用户 {interaction.user.name} 尝试重启机器人但密码错误。")
 
 @manage_group.command(name="封禁", description="永久封禁成员 (需要 '封禁成员' 权限)。")
 @app_commands.describe(user_id="要封禁的用户 ID (使用 ID 防止误操作)。", delete_message_days="删除该用户过去多少天的消息 (0-7，可选，默认为0)。", reason="(可选) 封禁的原因。")
