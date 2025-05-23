@@ -73,62 +73,79 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.thumbnail: Optional[str] = data.get('thumbnail')
 
     @classmethod
-    async def from_url(cls, url: str, *, loop: Optional[asyncio.AbstractEventLoop] = None, stream: bool = True, search: bool = False, playlist: bool = False) -> Union['YTDLSource', List[Dict[str, Any]], None]:
+    async def from_url(cls, url: str, *, loop: Optional[asyncio.AbstractEventLoop] = None, stream: bool = True, 
+                       playlist: bool = False) -> Union['YTDLSource', List[Dict[str, Any]], None]: # 移除了 search 参数
         loop = loop or asyncio.get_event_loop()
         
         current_ytdl_opts = YTDL_FORMAT_OPTIONS.copy()
-        # Update cookiefile path for this specific instance as well
+        # 确保cookiefile选项在每个YTDL实例中都得到应用
         current_ytdl_opts['cookiefile'] = COOKIE_FILE_PATH if os.path.exists(COOKIE_FILE_PATH) else None
 
         if playlist:
             current_ytdl_opts['noplaylist'] = False
-            current_ytdl_opts['extract_flat'] = 'discard_in_playlist'
-            current_ytdl_opts['playlistend'] = 25 
+            current_ytdl_opts['extract_flat'] = 'discard_in_playlist' # 获取播放列表中的所有条目信息
+            current_ytdl_opts['playlistend'] = 25 # 限制一次处理的播放列表条目数量
         else:
             current_ytdl_opts['noplaylist'] = True
 
+
         custom_ytdl = yt_dlp.YoutubeDL(current_ytdl_opts)
+        
+        # 为避免lambda中变量捕获问题，可以这样写：
+        def ytdl_extract_sync(): # 重命名以避免与外部函数重名 (如果存在)
+            return custom_ytdl.extract_info(url, download=not stream)
+        data = await loop.run_in_executor(None, ytdl_extract_sync)
 
-        if search and not (url.startswith(('http://', 'https://')) or "://" in url) : # More robust check for URL-like strings
-            url = f"ytsearch:{url}"
+        if not data:
+            # 根据 url 前缀判断是搜索还是直接链接
+            if url.startswith("scsearch:") or url.startswith("ytsearch:"): # 包括各种数量的搜索，如 scsearch1:
+                search_term = url.split(":", 1)[1] if ":" in url else url # 安全地获取搜索词
+                raise yt_dlp.utils.DownloadError(f"未找到与 '{search_term}' 相关的搜索结果。")
+            else:
+                raise yt_dlp.utils.DownloadError(f"无法从URL '{url}' 获取信息。")
 
-        data = await loop.run_in_executor(None, lambda: custom_ytdl.extract_info(url, download=not stream))
+        if 'entries' in data: # 这是播放列表或搜索结果的标志
+            if not data['entries']: # 空的播放列表或没有搜索结果
+                if playlist: 
+                    raise yt_dlp.utils.DownloadError(f"播放列表 '{data.get('title', url)}' 为空或无法访问。")
+                else: # 搜索没有结果
+                    search_term = url.split(":", 1)[1] if ":" in url else url
+                    raise yt_dlp.utils.DownloadError(f"未找到与 '{search_term}' 相关的搜索结果。")
 
-        if not data: # yt-dlp might return None or empty if nothing found
-            if search: raise yt_dlp.utils.DownloadError(f"未找到与 '{url.replace('ytsearch:', '')}' 相关的搜索结果。")
-            else: raise yt_dlp.utils.DownloadError(f"无法从URL '{url}' 获取信息。")
-
-
-        if 'entries' in data:
-            if not data['entries']: # Empty playlist or no search results
-                if playlist: raise yt_dlp.utils.DownloadError(f"播放列表 '{url}' 为空或无法访问。")
-                else: raise yt_dlp.utils.DownloadError(f"未找到与 '{url.replace('ytsearch:', '')}' 相关的搜索结果。")
-
-            if playlist:
+            if playlist: # 如果明确要求处理为播放列表 (例如 SoundCloud set/album, YouTube playlist)
                 return [
                     {'title': entry.get('title', '未知标题'), 
-                     'webpage_url': entry.get('webpage_url', entry.get('url')), 
+                     'webpage_url': entry.get('webpage_url', entry.get('url')), # 'url' 是备用
                      'duration': entry.get('duration'),
                      'thumbnail': entry.get('thumbnail'),
                      'uploader': entry.get('uploader')} 
-                    for entry in data['entries'] if entry and (entry.get('webpage_url') or entry.get('url')) # Ensure a URL exists
+                    for entry in data['entries'] if entry and (entry.get('webpage_url') or entry.get('url')) # 确保每个条目有效且有URL
                 ]
             else: 
+                # 如果不是显式播放列表请求，但 'entries' 存在 (例如来自 scsearch1: 或 ytsearch1:)
+                # 我们只取第一个结果作为单曲
                 data = data['entries'][0]
         
-        if not stream:
-            filename = custom_ytdl.prepare_filename(data)
+        # 到这里，data 应该是一个单独的歌曲条目信息
+        if not stream: # 如果需要下载文件 (通常不用于音乐机器人)
+            filename = custom_ytdl.prepare_filename(data) # yt-dlp 会处理文件名
             return cls(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS), data=data)
-        else:
-            if 'url' not in data: # Attempt to find a suitable audio stream URL
+        else: # 流式播放
+            # 确保 'url' 字段存在于 data 中，这是 FFmpeg 需要的流地址
+            if 'url' not in data: # 有时，主 'url' 不在顶层，而在 'formats' 中
                 best_audio_format = None
-                for f_format in data.get('formats', []):
+                for f_format in data.get('formats', []): # 遍历所有可用的格式
+                    #寻找最佳的纯音频流
                     if f_format.get('vcodec') == 'none' and f_format.get('acodec') != 'none' and 'url' in f_format:
-                        if best_audio_format is None or f_format.get('abr', 0) > best_audio_format.get('abr', 0):
+                        if best_audio_format is None or f_format.get('abr', 0) > best_audio_format.get('abr', 0): # abr = average bitrate
                             best_audio_format = f_format
-                if best_audio_format and 'url' in best_audio_format: data['url'] = best_audio_format['url']
-                elif data.get('url'): pass # Main data object has a URL
-                else: raise yt_dlp.utils.DownloadError(f"无法从 '{data.get('title', '未知视频')}' 提取有效的音频流URL。")
+                if best_audio_format and 'url' in best_audio_format:
+                    data['url'] = best_audio_format['url'] # 将找到的最佳音频流URL赋给顶层'url'
+                elif data.get('url'): # 如果顶层已经有一个url (可能是视频+音频)
+                    pass # 允许它，FFmpeg的-vn会尝试去除视频
+                else:
+                    # 如果在所有格式中都找不到合适的音频流URL
+                    raise yt_dlp.utils.DownloadError(f"无法从 '{data.get('title', '未知视频')}' 提取有效的音频流URL。")
             return cls(discord.FFmpegPCMAudio(data['url'], **FFMPEG_OPTIONS), data=data)
 
     @classmethod
@@ -478,58 +495,147 @@ class MusicCog(commands.Cog, name="音乐播放"):
         if interaction.guild_id in MusicCog._guild_states_ref: del MusicCog._guild_states_ref[interaction.guild_id]
 
 
-    @music_group.command(name="play", description="播放歌曲或添加到队列 (YouTube/Spotify/SoundCloud)。")
-    @app_commands.describe(query="输入YouTube/Spotify/SoundCloud链接或歌曲名称搜索。")
+    @music_group.command(name="play", description="播放歌曲。默认搜SoundCloud，也支持YouTube/SoundCloud链接。")
+    @app_commands.describe(query="输入歌曲名/艺术家 (优先搜SoundCloud)，或YouTube/SoundCloud等平台链接。")
     async def play_cmd(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer(ephemeral=False) 
+        await interaction.response.defer(ephemeral=False) # 公开的“正在播放”消息
         state = self.get_guild_state(interaction.guild_id)
         guild_name_debug_play = interaction.guild.name if interaction.guild else "UnknownGuild"
-        if not await self.ensure_voice(interaction, state): return
-
-        state.last_interaction_channel_id = interaction.channel.id 
-
-        is_spotify_url = "open.spotify.com" in query.lower()
-        is_youtube_playlist = ("youtube.com/playlist?" in query) or ("youtu.be/playlist?" in query)
-        is_soundcloud_url = "soundcloud.com/" in query.lower()
-        songs_to_add_data: List[Dict[str, Any]] = []; source_or_list_of_data: Union[YTDLSource, List[Dict[str, Any]], str, None] = None
-        initial_feedback_sent = False
-        pre_message = None # Initialize pre_message
         
+        # 确保用户在语音频道，并且机器人可以加入/移动
+        if not await self.ensure_voice(interaction, state): 
+            # ensure_voice 内部已经发送了ephemeral的错误消息，所以这里直接返回
+            return
+
+        state.last_interaction_channel_id = interaction.channel.id # 记录交互频道ID
+
+        # 判断链接类型
+        is_spotify_url = "open.spotify.com/" in query.lower()
+        is_youtube_url = ("youtube.com/" in query.lower()) or ("youtu.be/" in query.lower())
+        is_soundcloud_url = "soundcloud.com/" in query.lower()
+        # 粗略判断是否是其他直接链接 (不是上述平台)
+        is_direct_link = query.startswith(('http://', 'https://')) and not (is_youtube_url or is_soundcloud_url or is_spotify_url)
+
+        songs_to_add_data: List[Dict[str, Any]] = []
+        source_or_list_of_data: Union[YTDLSource, List[Dict[str, Any]], str, None] = None
+        initial_feedback_sent = False # 标记是否已发送过临时反馈
+        pre_message: Optional[discord.WebhookMessage] = None # 用于编辑的初始反馈消息
+
+        url_to_process = query # 将要传递给 YTDLSource.from_url 的最终查询字符串
+        is_playlist_request = False # 标记是否正在请求一个播放列表
+
         try:
-            pre_message = await interaction.followup.send(f"⚙️ 正在处理查询: `{query[:70]}...`", ephemeral=True, wait=True)
-            
-            if is_spotify_url: source_or_list_of_data = await YTDLSource.from_spotify(query, loop=self.bot.loop)
-            elif is_youtube_playlist or is_soundcloud_url: source_or_list_of_data = await YTDLSource.from_url(query, loop=self.bot.loop, stream=True, playlist=True)
-            else: source_or_list_of_data = await YTDLSource.from_url(query, loop=self.bot.loop, stream=True, search=True)
+            # 准备初始处理消息
+            processing_message_content = f"⚙️ 正在处理查询: `{query[:70]}...`"
 
-            if source_or_list_of_data == "private_playlist": await pre_message.edit(content=f"❌ 无法处理Spotify链接: `{query}`。该播放列表可能是私有的或不可用。"); return
-            if source_or_list_of_data is None: await pre_message.edit(content=f"❌ 未能从链接/查询解析到任何歌曲: `{query}`。"); return
+            if is_youtube_url:
+                processing_message_content = f"🔗 正在处理 YouTube 链接: `{query[:70]}...`"
+                # 判断是否是YouTube播放列表
+                if ("youtube.com/playlist?" in query.lower()) or ("youtu.be/playlist?" in query.lower()):
+                    is_playlist_request = True
+            elif is_soundcloud_url:
+                processing_message_content = f"🎧 正在处理 SoundCloud 链接: `{query[:70]}...`"
+                # 判断是否是SoundCloud播放列表/专辑 (sets 或 albums)
+                if "/sets/" in query.lower() or "/albums/" in query.lower():
+                    is_playlist_request = True
+            elif is_spotify_url:
+                # Spotify 的逻辑是获取元数据后通常去YouTube搜索
+                processing_message_content = f"🔗 正在处理 Spotify 链接 (通常会在YouTube上搜索匹配项): `{query[:70]}...`"
+                # from_spotify 内部会判断是单曲还是列表，并返回相应结构
+            elif is_direct_link:
+                processing_message_content = f"🔗 正在处理直接链接: `{query[:70]}...`"
+            else: # 如果不是任何已知平台的 URL，则认为是搜索词，强制搜索 SoundCloud
+                url_to_process = f"scsearch1:{query}" # "scsearch1:" 表示搜索SoundCloud并获取第一个结果
+                processing_message_content = f"☁️ 正在 SoundCloud 上搜索: `{query[:70]}...`"
+                # 对于 scsearch1，我们期望的是单个结果，所以 is_playlist_request 保持 False
             
-            if isinstance(source_or_list_of_data, list): songs_to_add_data.extend(source_or_list_of_data)
-            elif isinstance(source_or_list_of_data, YTDLSource): songs_to_add_data.append(source_or_list_of_data.data)
-            else: await pre_message.edit(content=f"❓ 未能找到与查询 `{query}` 相关的内容。"); return
-
-            if not songs_to_add_data: await pre_message.edit(content=f"列表 `{query}` 中未找到可播放的歌曲。"); return
-
-            for song_data_dict in songs_to_add_data: state.queue.append(song_data_dict)
+            # 发送初始的“处理中”消息 (ephemeral)
+            pre_message = await interaction.followup.send(processing_message_content, ephemeral=True, wait=True)
             
-            feedback_msg = f"✅ 已将 **{songs_to_add_data[0].get('title', '歌曲') if len(songs_to_add_data) == 1 else f'{len(songs_to_add_data)} 首歌'}** 添加到队列。"
-            await pre_message.edit(content=feedback_msg) 
-            initial_feedback_sent = True 
+            # 调用核心处理逻辑
+            if is_spotify_url:
+                source_or_list_of_data = await YTDLSource.from_spotify(query, loop=self.bot.loop)
+            else:
+                # from_url 不再需要 search=True 参数，因为它现在只处理直接的 URL 或已构造好的搜索查询
+                source_or_list_of_data = await YTDLSource.from_url(
+                    url_to_process, 
+                    loop=self.bot.loop, 
+                    stream=True, 
+                    playlist=is_playlist_request # 传递是否按播放列表处理
+                )
+
+            # 处理返回结果
+            if source_or_list_of_data == "private_playlist": # Spotify 私有播放列表的特殊返回值
+                await pre_message.edit(content=f"❌ 无法处理链接: `{query}`。该播放列表可能是私有的或不可用。")
+                return
+            if source_or_list_of_data is None: # 没有找到任何内容
+                await pre_message.edit(content=f"❌ 未能从链接/查询解析到任何歌曲: `{query}`。")
+                return
+            
+            # 将获取到的数据统一到 songs_to_add_data 列表中
+            if isinstance(source_or_list_of_data, list): # 如果返回的是播放列表
+                songs_to_add_data.extend(source_or_list_of_data)
+            elif isinstance(source_or_list_of_data, YTDLSource): # 如果返回的是单个YTDLSource对象
+                songs_to_add_data.append(source_or_list_of_data.data) # 我们需要的是原始数据字典
+            else: # 理论上不应该到这里，因为上面已经检查了 None
+                await pre_message.edit(content=f"❓ 未能找到与查询 `{query}` 相关的内容或格式无法识别。")
+                return
+
+            if not songs_to_add_data: # 如果处理后列表仍然为空
+                await pre_message.edit(content=f"列表/查询 `{query}` 中未找到可播放的歌曲。")
+                return
+
+            # 将所有找到的歌曲数据添加到服务器的播放队列
+            for song_data_dict in songs_to_add_data:
+                state.queue.append(song_data_dict)
+            
+            # 构建成功反馈消息
+            source_name = "SoundCloud" if url_to_process.startswith("scsearch") or is_soundcloud_url else \
+                          "YouTube" if is_youtube_url else \
+                          "Spotify (匹配项)" if is_spotify_url else \
+                          "直接链接" if is_direct_link else "搜索结果"
+
+            num_songs_added = len(songs_to_add_data)
+            first_song_title_added = songs_to_add_data[0].get('title', '歌曲') if num_songs_added > 0 else "歌曲"
+            
+            if num_songs_added == 1:
+                final_feedback_msg = f"✅ 已将来自 {source_name} 的歌曲 **{first_song_title_added}** 添加到队列。"
+            else:
+                final_feedback_msg = f"✅ 已将来自 {source_name} 的 **{num_songs_added} 首歌** 添加到队列 (第一首: {first_song_title_added[:50]}{'...' if len(first_song_title_added)>50 else ''})。"
+            
+            await pre_message.edit(content=final_feedback_msg)
+            initial_feedback_sent = True # 标记已发送临时反馈
 
         except yt_dlp.utils.DownloadError as e_dl_play: 
-            if pre_message: await pre_message.edit(content=f"❌ 处理查询时发生下载错误: `{str(e_dl_play)[:300]}`。\n内容可能不可用或受地区限制。")
-            elif not initial_feedback_sent: await interaction.followup.send(f"❌ 处理查询时发生下载错误: `{str(e_dl_play)[:300]}`", ephemeral=True)
-            return
+            error_content = f"❌ 处理查询时发生下载错误: `{str(e_dl_play)[:300]}`。"
+            if "Sign in to confirm you're not a bot" in str(e_dl_play) and is_youtube_url:
+                error_content += "\nYouTube 需要登录验证，请确保 Cookie 文件有效或尝试 SoundCloud 链接。"
+            elif is_soundcloud_url or url_to_process.startswith("scsearch"):
+                 error_content += "\n请检查 SoundCloud 链接是否有效或歌曲/播放列表是否公开。"
+            
+            if pre_message: await pre_message.edit(content=error_content)
+            # 如果 pre_message 未发送（不太可能到这里），则用 followup.send
+            elif not initial_feedback_sent: await interaction.followup.send(error_content, ephemeral=True) 
+            return # 出错后不再继续
         except Exception as e_play_generic:
-            print(f"[{guild_name_debug_play}] /play 命令执行出错: {type(e_play_generic).__name__} - {e_play_generic}")
-            import traceback; traceback.print_exc()
-            if pre_message: await pre_message.edit(content=f"❌ 发生未知错误: {type(e_play_generic).__name__}。请检查日志。")
-            elif not initial_feedback_sent: await interaction.followup.send(f"❌ 发生未知错误: {type(e_play_generic).__name__}。", ephemeral=True)
-            return
+            print(f"[{guild_name_debug_play}] /play 命令执行时发生严重错误: {type(e_play_generic).__name__} - {e_play_generic}")
+            import traceback
+            traceback.print_exc()
+            error_content_generic = f"❌ 处理您的请求时发生未知内部错误: {type(e_play_generic).__name__}。管理员请检查日志。"
+            if pre_message: await pre_message.edit(content=error_content_generic)
+            elif not initial_feedback_sent: await interaction.followup.send(error_content_generic, ephemeral=True)
+            return # 出错后不再继续
 
+        # 如果当前没有歌曲在播放，并且队列不为空，则开始播放
+        # 注意：如果 initial_feedback_sent 为 True，表示已经通过 pre_message.edit 给了用户反馈，
+        # play_next_song_async 内部发送的“正在播放”消息应该是公开的。
+        # 如果 initial_feedback_sent 为 False (例如 pre_message 发送失败了)，
+        # 并且 play_next_song_async 是第一次播放，它应该使用 interaction.followup.send 来发送公开的“正在播放”消息。
         if not state.voice_client.is_playing() and not state.current_song: 
-            await state.play_next_song_async(interaction if not initial_feedback_sent else None) 
+            # 如果已经发送了临时的 "已添加" 反馈，play_next_song_async 不需要原始的 interaction 来回复
+            # 它会自己创建新的 "正在播放" 消息。
+            # 如果上面的 pre_message.edit 失败了，这里传递 interaction 确保至少有一次回应。
+            await state.play_next_song_async(interaction if not initial_feedback_sent and not interaction.response.is_done() else None) 
 
     @music_group.command(name="skip", description="跳过当前播放的歌曲。")
     async def skip_cmd(self, interaction: discord.Interaction):
