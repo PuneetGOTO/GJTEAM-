@@ -301,8 +301,11 @@ class GuildMusicState:
             error_message = f"❌ 播放时发生未知错误 ({song_title_debug}): {type(e_generic).__name__} - {str(e_generic)[:200]}"
             print(f"[{guild_name}] {error_message}")
             import traceback; traceback.print_exc()
-            channel_to_reply_id = (interaction_for_reply.channel.id if interaction_for_reply and interaction_for_reply.channel 
-                                   else original_interaction_channel_id)
+            # 第 304 行开始
+            channel_to_reply_id = (
+                interaction_for_reply.channel.id if interaction_for_reply and interaction_for_reply.channel
+                else original_interaction_channel_id
+            ) # 第 306 行 (新行)
             if channel_to_reply_id and self.bot_loop:
                 bot_instance = getattr(self.bot_loop, '_bot_instance_for_music_cog', None)
                 if bot_instance:
