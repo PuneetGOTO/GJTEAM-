@@ -9,7 +9,7 @@ import re
 from typing import Optional, List, Dict, Any, Union # Added more specific types
 
 # Suppress noise about console usage from errors
-yt_dlp.utils.bug_reports_message = lambda: ''
+yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
 
 YTDL_FORMAT_OPTIONS = {
     'format': 'bestaudio/best',
