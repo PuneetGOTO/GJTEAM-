@@ -84,7 +84,6 @@ bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=
 bot.closing_tickets_in_progress = set() # Add this line
 bot.approved_bot_whitelist = {} # {guild_id: set(bot_id1, bot_id2)} # <--- 新增这一行
 bot.persistent_views_added_in_setup = False
-bot.is_in_maintenance_mode = False
 
 class CloseTicketView(ui.View):
     def __init__(self):
@@ -1852,18 +1851,6 @@ async def slash_help(interaction: discord.Interaction):
     )
     embed.set_thumbnail(url=bot.user.display_avatar.url) # 显示机器人头像
 
-
-    # --- 新增：机器人维护指令组 ---
-    embed.add_field(
-        name="🛠️ 机器人维护 (/机器人维护 ...)",
-        value=(
-            "`... start [原因]` - [服主] 开启维护模式\n"
-            "`... stop` - [服主] 关闭维护模式"
-        ),
-        inline=False
-    )
-    # --- 机器人维护指令组结束 ---
-    
     # 身份组管理
     embed.add_field(
         name="👤 身份组管理",
@@ -3318,97 +3305,11 @@ async def voice_claim(interaction: discord.Interaction):
     except discord.Forbidden: await interaction.followup.send(f"⚙️ 获取房主权限失败：机器人权限不足。", ephemeral=True)
     except Exception as e: print(f"执行 /语音 房主 时出错: {e}"); await interaction.followup.send(f"⚙️ 获取房主权限时发生未知错误: {e}", ephemeral=True)
 
-    # ... (你现有的 manage_group, voice_group, ai_group 指令定义) ...
-
-# --- Bot Maintenance Command Group ---
-maintenance_group = app_commands.Group(name="机器人维护", description="[服主专用] 管理机器人维护模式。")
-
-@maintenance_group.command(name="start", description="[服主专用] 开启机器人维护模式。")
-@app_commands.describe(reason="维护原因 (可选，将显示在状态中)。")
-async def maintenance_start(interaction: discord.Interaction, reason: Optional[str] = None):
-    if interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message("🚫 只有服务器所有者才能执行此操作。", ephemeral=True)
-        return
-    
-    await interaction.response.defer(ephemeral=True)
-
-    bot.is_in_maintenance_mode = True
-    status_message = "正在进行维护"
-    if reason:
-        status_message += f": {reason[:50]}" # 限制状态消息中原因的长度
-
-    try:
-        await bot.change_presence(
-            status=discord.Status.dnd, # Do Not Disturb
-            activity=discord.Game(name=status_message)
-        )
-        await interaction.followup.send(f"✅ 机器人已进入维护模式。\n状态更新为: `{status_message}`", ephemeral=True)
-        print(f"[MAINTENANCE] Bot maintenance mode ENABLED by {interaction.user.name} ({interaction.user.id}). Reason: {reason if reason else 'N/A'}")
-        
-        # 可选：发送日志到公共频道
-        log_embed = discord.Embed(
-            title="🛠️ 机器人维护模式 - 已启动",
-            description=f"机器人已由服务器所有者 {interaction.user.mention} 设置为维护模式。",
-            color=discord.Color.orange(),
-            timestamp=discord.utils.utcnow()
-        )
-        if reason:
-            log_embed.add_field(name="原因", value=reason, inline=False)
-        if bot.user.avatar:
-            log_embed.set_thumbnail(url=bot.user.display_avatar.url)
-        await send_to_public_log(interaction.guild, log_embed, log_type="Bot Maintenance Start")
-
-    except Exception as e:
-        bot.is_in_maintenance_mode = False # Revert if presence change fails
-        await interaction.followup.send(f"⚙️ 启动维护模式时发生错误: {e}", ephemeral=True)
-        print(f"[MAINTENANCE ERROR] Failed to enable maintenance mode: {e}")
-
-
-@maintenance_group.command(name="stop", description="[服主专用] 关闭机器人维护模式。")
-async def maintenance_stop(interaction: discord.Interaction):
-    if interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message("🚫 只有服务器所有者才能执行此操作。", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    bot.is_in_maintenance_mode = False
-    default_status_message = "/help 显示帮助" # 你的默认状态
-
-    try:
-        await bot.change_presence(
-            status=discord.Status.online,
-            activity=discord.Game(name=default_status_message)
-        )
-        await interaction.followup.send(f"✅ 机器人维护模式已关闭。\n状态已恢复为: `{default_status_message}`", ephemeral=True)
-        print(f"[MAINTENANCE] Bot maintenance mode DISABLED by {interaction.user.name} ({interaction.user.id}).")
-
-        # 可选：发送日志到公共频道
-        log_embed = discord.Embed(
-            title="🛠️ 机器人维护模式 - 已停止",
-            description=f"机器人维护模式已由服务器所有者 {interaction.user.mention} 关闭。机器人恢复正常运行。",
-            color=discord.Color.green(),
-            timestamp=discord.utils.utcnow()
-        )
-        if bot.user.avatar:
-            log_embed.set_thumbnail(url=bot.user.display_avatar.url)
-        await send_to_public_log(interaction.guild, log_embed, log_type="Bot Maintenance Stop")
-
-    except Exception as e:
-        # Even if presence change fails, the mode is considered off
-        await interaction.followup.send(f"⚙️ 关闭维护模式时发生错误 (但模式已标记为关闭): {e}", ephemeral=True)
-        print(f"[MAINTENANCE ERROR] Failed to disable maintenance mode (presence change failed): {e}")
-
-# --- 将新的指令组添加到 bot tree ---
-# (确保这行在所有指令组定义之后，通常在你的代码接近末尾的地方)
-# bot.tree.add_command(maintenance_group)
-
 
 # --- Add the command groups to the bot tree ---
 bot.tree.add_command(manage_group)
 bot.tree.add_command(voice_group)
 bot.tree.add_command(ai_group)
-bot.tree.add_command(maintenance_group)
 
 # --- Run the Bot ---
 if __name__ == "__main__":
