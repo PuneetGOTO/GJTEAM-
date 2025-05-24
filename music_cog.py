@@ -498,7 +498,7 @@ class MusicCog(commands.Cog, name="音乐播放"):
     @music_group.command(name="play", description="播放歌曲。默认搜SoundCloud，也支持YouTube/SoundCloud链接。")
     @app_commands.describe(query="输入歌曲名/艺术家 (优先搜SoundCloud)，或YouTube/SoundCloud等平台链接。")
     async def play_cmd(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer(ephemeral=False) # 公开的“正在播放”消息
+        await interaction.response.defer(ephemeral=True) # 公开的“正在播放”消息
         state = self.get_guild_state(interaction.guild_id)
         guild_name_debug_play = interaction.guild.name if interaction.guild else "UnknownGuild"
         
