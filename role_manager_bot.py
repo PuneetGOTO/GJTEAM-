@@ -93,6 +93,20 @@ MAX_FAQ_ANSWER_LENGTH = 1500   # 单个FAQ答案的最大长度
 MAX_FAQ_LIST_DISPLAY = 20      # /faq list 中显示的最大条目数
 # --- 服务器独立FAQ/帮助系统结束 ---
 
+# --- (在你现有的配置区域) ---
+
+# --- 服务器内匿名中介私信系统 ---
+# 结构: {message_id_sent_to_user_dm: {"initiator_id": int, "target_id": int, "original_channel_id": int, "guild_id": int}}
+# message_id_sent_to_user_dm 是机器人发送给目标用户的初始私信的ID，用于追踪回复
+ANONYMOUS_RELAY_SESSIONS = {}
+# 可选：为了让发起者在频道内回复，可能需要一个更持久的会话ID
+# {relay_session_id (e.g., unique_string): {"initiator_id": int, "target_id": int, "original_channel_id": int, "guild_id": int, "last_target_dm_message_id": int}}
+# 为简化，我们先基于初始DM的message_id
+
+# 允许使用此功能的身份组 (可选, 如果不设置则所有成员可用，但需谨慎)
+ANONYMOUS_RELAY_ALLOWED_ROLE_IDS = [] # 例如: [1234567890] 如果需要限制
+# --- 服务器内匿名中介私信系统结束 ---
+
 # --- Intents Configuration ---
 # 确保这些也在 Discord 开发者门户中启用了！
 intents = discord.Intents.default()
@@ -1572,6 +1586,71 @@ async def handle_ai_dialogue(message: discord.Message, is_private_chat: bool = F
 # --- Event: On Message - Handles AI Dialogues, Content Check, Spam ---
 @bot.event
 async def on_message(message: discord.Message):
+    # --- 首先处理来自用户的私信，判断是否为 RelayMsg 回复 ---
+    if isinstance(message.channel, discord.DMChannel) and message.author.id != bot.user.id:
+        # 检查这条DM是否是对我们发送的初始匿名消息的回复
+        if message.reference and message.reference.message_id in ANONYMOUS_RELAY_SESSIONS:
+            session_info = ANONYMOUS_RELAY_SESSIONS[message.reference.message_id]
+            
+            # 确保回复者是当时的目标用户 (理论上应该是，因为是回复特定消息)
+            if message.author.id == session_info["target_id"]:
+                original_channel_id = session_info["original_channel_id"]
+                initiator_id = session_info["initiator_id"]
+                target_id = session_info["target_id"] # 就是 message.author.id
+                initiator_display_name = session_info["initiator_display_name"]
+                guild_id = session_info["guild_id"]
+
+                guild = bot.get_guild(guild_id)
+                if not guild:
+                    print(f"[RelayMsg ERROR] Guild {guild_id} not found for session from DM {message.reference.message_id}")
+                    return
+
+                original_channel = guild.get_channel(original_channel_id)
+                if not original_channel or not isinstance(original_channel, discord.TextChannel): # 或 Thread
+                    print(f"[RelayMsg ERROR] Original channel {original_channel_id} not found or not text/thread for session.")
+                    # 可以考虑私信通知发起者，他的原始频道找不到了
+                    return
+
+                # 构建要转发到服务器频道的消息
+                # 注意：这里 target_user.display_name 是公开的
+                target_user_obj = await bot.fetch_user(target_id) # 获取最新的用户信息
+                
+                reply_embed = discord.Embed(
+                    title=f"💬 来自 {target_user_obj.display_name if target_user_obj else f'用户 {target_id}'} 的回复",
+                    description=f"```\n{message.content}\n```",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                reply_embed.set_footer(text=f"此回复针对由 {initiator_display_name} 发起的匿名消息")
+                if message.attachments:
+                    # 简单处理第一个附件作为图片预览，更复杂的附件处理需要更多代码
+                    if message.attachments[0].content_type and message.attachments[0].content_type.startswith('image/'):
+                         reply_embed.set_image(url=message.attachments[0].url)
+                    else:
+                        reply_embed.add_field(name="📎 附件", value=f"[{message.attachments[0].filename}]({message.attachments[0].url})", inline=False)
+
+
+                try:
+                    await original_channel.send(
+                        content=f"<@{initiator_id}>，你收到了对匿名消息的回复：", # Ping 发起者
+                        embed=reply_embed
+                    )
+                    print(f"[RelayMsg] Relayed reply from Target {target_id} (DM) to Initiator {initiator_id} in channel {original_channel_id}")
+                    # 可选：私信用户B，告知他们的回复已成功转发
+                    await message.author.send("✅ 你的回复已成功转发。", delete_after=30)
+
+                    # 更新会话信息，以便频道内可以通过 /relaymsg reply 回复
+                    # 为了简单，这里我们不再追踪 message.id，而是让用户在频道内指定目标用户进行回复
+                    # 如果要做更复杂的会话追踪，ANONYMOUS_RELAY_SESSIONS 结构需要调整
+
+                except discord.Forbidden:
+                    print(f"[RelayMsg ERROR] Bot lacks permission to send message in original channel {original_channel_id}")
+                    # 可以尝试私信通知发起者转发失败
+                except Exception as e:
+                    print(f"[RelayMsg ERROR] Relaying DM reply: {e}")
+                return # 处理完这条DM回复后，不再进行后续的on_message逻辑
+
+
     # --- 基本过滤 ---
     if not message.guild or message.author.bot:
         return 
@@ -1918,7 +1997,7 @@ async def slash_help(interaction: discord.Interaction):
         inline=False
     )
 
-        # 审核与管理
+    # 审核与管理
     embed.add_field(
         name="🛠️ 审核与管理",
         value=(
@@ -1926,6 +2005,16 @@ async def slash_help(interaction: discord.Interaction):
             "`/warn [用户] [原因]` - 手动警告用户 (累计3次踢出)\n"
             "`/unwarn [用户] [原因]` - 移除用户一次警告\n"  # <--- 确保这里有换行符
             "`/notify_member [用户] [消息内容]` - 通过机器人向指定成员发送私信。" # <--- 新增这行
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🕵️ 匿名中介私信 (/relaymsg ...)",
+        value=(
+            "`... send [目标用户] [消息]` - 通过机器人向指定成员发送匿名消息。\n"
+            "*接收方可以直接回复机器人私信，回复将被转发回你发起命令的频道。*"
+            # 如果未来添加频道内回复功能，可以在此补充
         ),
         inline=False
     )
@@ -2930,6 +3019,79 @@ async def faq_search(interaction: discord.Interaction, keyword: str):
 
 # --- FAQ/帮助 指令组结束 ---
 
+# --- (在你其他指令组如 manage_group, ai_group, faq_group 定义完成之后) ---
+
+relay_msg_group = app_commands.Group(name="relaymsg", description="服务器内匿名中介私信功能")
+
+@relay_msg_group.command(name="send", description="向服务器内另一位成员发送一条匿名消息。")
+@app_commands.describe(
+    target_user="你要向其发送匿名消息的成员。",
+    message="你要发送的消息内容。"
+)
+async def relay_msg_send(interaction: discord.Interaction, target_user: discord.Member, message: str):
+    await interaction.response.defer(ephemeral=True) # 初始响应对发起者临时可见
+
+    guild = interaction.guild
+    initiator = interaction.user # 发起者
+
+    if not guild:
+        await interaction.followup.send("❌ 此命令只能在服务器频道中使用。", ephemeral=True)
+        return
+    if target_user.bot:
+        await interaction.followup.send("❌ 不能向机器人发送匿名消息。", ephemeral=True)
+        return
+    if target_user == initiator:
+        await interaction.followup.send("❌ 你不能给自己发送匿名消息。", ephemeral=True)
+        return
+    
+    # 可选：检查发起者是否有权使用此功能
+    if ANONYMOUS_RELAY_ALLOWED_ROLE_IDS:
+        can_use = False
+        if isinstance(initiator, discord.Member):
+            for role_id in ANONYMOUS_RELAY_ALLOWED_ROLE_IDS:
+                if discord.utils.get(initiator.roles, id=role_id):
+                    can_use = True
+                    break
+        if not can_use:
+            await interaction.followup.send("🚫 你没有权限使用此功能。", ephemeral=True)
+            return
+
+    if len(message) > 1800: # 留一些空间给机器人的提示信息
+        await interaction.followup.send("❌ 消息内容过长 (最多约1800字符)。", ephemeral=True)
+        return
+
+    dm_embed = discord.Embed(
+        title=f"✉️ 一条来自 {guild.name} 的消息",
+        description=f"```\n{message}\n```\n\n"
+                    f"ℹ️ 这是一条通过服务器机器人转发的消息。\n"
+                    f"你可以直接在此私信中 **回复这条消息** 来回应，你的回复也会通过机器人转发。\n"
+                    f"*(你的身份对消息来源者是可见的，但消息来源者的身份对你是匿名的)*", # 或者调整匿名性措辞
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow()
+    )
+    dm_embed.set_footer(text=f"消息来自服务器: {guild.name}")
+
+    try:
+        sent_dm_message = await target_user.send(embed=dm_embed)
+        # 记录这个会话，使用机器人发送的DM消息ID作为键
+        ANONYMOUS_RELAY_SESSIONS[sent_dm_message.id] = {
+            "initiator_id": initiator.id,
+            "target_id": target_user.id,
+            "original_channel_id": interaction.channel_id, # 记录发起命令的频道
+            "guild_id": guild.id,
+            "initiator_display_name": initiator.display_name # 用于在频道内显示谁发起了对某人的匿名消息
+        }
+        await interaction.followup.send(f"✅ 你的匿名消息已通过机器人发送给 {target_user.mention}。请等待对方在私信中回复。", ephemeral=True)
+        print(f"[RelayMsg] Initiator {initiator.id} sent message to Target {target_user.id} via DM {sent_dm_message.id}. Original channel: {interaction.channel_id}")
+
+    except discord.Forbidden:
+        await interaction.followup.send(f"❌ 无法向 {target_user.mention} 发送私信。对方可能关闭了私信或屏蔽了机器人。", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ 发送私信时发生错误: {e}", ephemeral=True)
+        print(f"[RelayMsg ERROR] Sending DM to {target_user.id}: {e}")
+
+# 将新的指令组添加到 bot tree (这会在文件末尾统一做)
+
 # --- Management Command Group Definitions ---
 # manage_group = app_commands.Group(...)
 # ... (你现有的 manage_group 指令)
@@ -3637,6 +3799,7 @@ bot.tree.add_command(manage_group)
 bot.tree.add_command(voice_group)
 bot.tree.add_command(ai_group)
 bot.tree.add_command(faq_group)
+bot.tree.add_command(relay_msg_group)
 
 # --- Run the Bot ---
 if __name__ == "__main__":
