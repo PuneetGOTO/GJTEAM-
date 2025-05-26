@@ -71,6 +71,28 @@ MAX_AI_HISTORY_TURNS = 10 # AI 对话功能的最大历史轮数 (每轮包含�
 active_private_ai_chats = {} 
 # --- AI 对话功能配置与存储结束 ---
 
+# --- 新增：服务器专属AI知识库 ---
+# 结构: {guild_id: List[str]}
+guild_knowledge_bases = {}
+MAX_KB_ENTRIES_PER_GUILD = 50 
+MAX_KB_ENTRY_LENGTH = 1000   
+MAX_KB_DISPLAY_ENTRIES = 15 
+# --- 服务器专属AI知识库结束 ---
+
+# --- (在你的配置区域，可以放在 guild_knowledge_bases 附近) ---
+
+# --- 新增：服务器独立FAQ/帮助系统 ---
+# 结构: {guild_id: List[Dict[str, str]]}  每个字典包含 "keyword" 和 "answer"
+# 或者更简单：{guild_id: Dict[str, str]}  其中 key 是关键词，value 是答案
+# 我们先用简单的 Dict[str, str] 结构，一个关键词对应一个答案。
+# 如果需要更复杂的，比如一个关键词对应多个答案片段，或带标题的条目，可以调整。
+server_faqs = {}
+MAX_FAQ_ENTRIES_PER_GUILD = 100 # 每个服务器FAQ的最大条目数
+MAX_FAQ_KEYWORD_LENGTH = 50    # 单个FAQ关键词的最大长度
+MAX_FAQ_ANSWER_LENGTH = 1500   # 单个FAQ答案的最大长度
+MAX_FAQ_LIST_DISPLAY = 20      # /faq list 中显示的最大条目数
+# --- 服务器独立FAQ/帮助系统结束 ---
+
 # --- Intents Configuration ---
 # 确保这些也在 Discord 开发者门户中启用了！
 intents = discord.Intents.default()
@@ -1390,37 +1412,37 @@ async def handle_ai_dialogue(message: discord.Message, is_private_chat: bool = F
     :param is_private_chat: bool, 是否为私聊频道
     :param dep_channel_config: dict, 如果是DEP频道，则传入其配置
     """
-    user = message.author 
+    user = message.author
     channel = message.channel
-    # guild = message.guild # guild is part of message object
+    guild = message.guild # guild is part of message object
 
     user_prompt_text = message.content.strip()
-    if not user_prompt_text: 
+    if not user_prompt_text:
         if message.attachments: print(f"[AI DIALOGUE HANDLER] Message in {channel.id} from {user.id} has attachments but no text, ignoring.")
         return
 
     history_key = None
     dialogue_model = None
-    system_prompt_for_api = None 
+    system_prompt_for_api = None # 这是从DEP频道配置中获取的原始系统提示
 
     if is_private_chat:
         chat_info = active_private_ai_chats.get(channel.id)
         if not chat_info :
             print(f"[AI DIALOGUE HANDLER] Private chat {channel.id} - chat_info not found in active_private_ai_chats dict.")
-            return 
+            return
         
-        # 确保消息来自频道创建者 (或者机器人自己发的初始消息)
         if chat_info.get("user_id") != user.id and user.id != bot.user.id:
              print(f"[AI DIALOGUE HANDLER] Private chat {channel.id} - message from non-owner {user.id} (owner: {chat_info.get('user_id')}). Ignoring.")
              return
 
         history_key = chat_info.get("history_key")
         dialogue_model = chat_info.get("model", DEFAULT_AI_DIALOGUE_MODEL)
-    elif dep_channel_config: 
+        # 私聊通常没有频道特定的 system_prompt_for_api，但如果以后需要，可以在此添加
+    elif dep_channel_config:
         history_key = dep_channel_config.get("history_key")
         dialogue_model = dep_channel_config.get("model", DEFAULT_AI_DIALOGUE_MODEL)
-        system_prompt_for_api = dep_channel_config.get("system_prompt")
-    else: 
+        system_prompt_for_api = dep_channel_config.get("system_prompt") # 获取频道配置的系统提示
+    else:
         print(f"[AI DIALOGUE HANDLER ERROR] Called without private_chat flag or dep_channel_config for channel {channel.id}")
         return
 
@@ -1430,13 +1452,34 @@ async def handle_ai_dialogue(message: discord.Message, is_private_chat: bool = F
         except: pass
         return
     
-    if history_key not in conversation_histories: 
+    if history_key not in conversation_histories:
         conversation_histories[history_key] = deque(maxlen=MAX_AI_HISTORY_TURNS * 2)
     history_deque = conversation_histories[history_key]
 
     api_messages = []
-    if system_prompt_for_api: 
-        api_messages.append({"role": "system", "content": system_prompt_for_api})
+
+    # --- 整合服务器知识库和频道系统提示 ---
+    knowledge_base_content = ""
+    # 确保 guild_knowledge_bases 已在文件顶部定义
+    if guild and guild.id in guild_knowledge_bases and guild_knowledge_bases[guild.id]:
+        knowledge_base_content += "\n\n--- 服务器知识库信息 (请优先参考以下内容回答服务器特定问题) ---\n"
+        for i, entry in enumerate(guild_knowledge_bases[guild.id]):
+            knowledge_base_content += f"{i+1}. {entry}\n"
+        knowledge_base_content += "--- 服务器知识库信息结束 ---\n"
+
+    effective_system_prompt = ""
+    if system_prompt_for_api: # 使用从DEP频道配置中获取的 system_prompt_for_api
+        effective_system_prompt = system_prompt_for_api
+    
+    if knowledge_base_content: # 将知识库内容附加到（或构成）系统提示
+        if effective_system_prompt:
+            effective_system_prompt += knowledge_base_content
+        else:
+            effective_system_prompt = knowledge_base_content.strip()
+
+    if effective_system_prompt:
+        api_messages.append({"role": "system", "content": effective_system_prompt})
+    # --- 服务器知识库与系统提示整合结束 ---
     
     for msg_entry in history_deque:
         if msg_entry.get("role") in ["user", "assistant"] and "content" in msg_entry and msg_entry.get("content") is not None:
@@ -1444,11 +1487,13 @@ async def handle_ai_dialogue(message: discord.Message, is_private_chat: bool = F
     
     api_messages.append({"role": "user", "content": user_prompt_text})
 
-    print(f"[AI DIALOGUE HANDLER] Processing for {('Private' if is_private_chat else 'DEP')} Channel {channel.id}, User {user.id}, Model {dialogue_model}, HistKey {history_key}, SysP: {system_prompt_for_api is not None}")
+    # 更新的 print 语句
+    print(f"[AI DIALOGUE HANDLER] Processing for {('Private' if is_private_chat else 'DEP')} Channel {channel.id}, User {user.id}, Model {dialogue_model}, HistKey {history_key}, SysP: {effective_system_prompt != ''}")
 
     try:
         async with channel.typing():
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session: # Ensure aiohttp is imported
+            # 确保 aiohttp 已导入
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
                 response_embed_text, final_content_hist, api_error = await get_deepseek_dialogue_response(
                     session, DEEPSEEK_API_KEY, dialogue_model, api_messages
                 )
@@ -1469,28 +1514,37 @@ async def handle_ai_dialogue(message: discord.Message, is_private_chat: bool = F
                 color=discord.Color.blue() if is_private_chat else discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
-            author_name_prefix = f"{user.display_name} " if not is_private_chat else "" 
-            embed_author_name = f"{author_name_prefix}与 {dialogue_model.split('-')[-1].capitalize()} 对话中"
+            author_name_prefix = f"{user.display_name} " if not is_private_chat else ""
+            model_display_name_parts = dialogue_model.split('-')
+            model_short_name = model_display_name_parts[-1].capitalize() if len(model_display_name_parts) > 1 else dialogue_model.capitalize()
+            embed_author_name = f"{author_name_prefix}与 {model_short_name} 对话中"
+
             if user.avatar:
                 embed.set_author(name=embed_author_name, icon_url=user.display_avatar.url)
             else:
                 embed.set_author(name=embed_author_name)
 
-            if not is_private_chat: 
+            if not is_private_chat:
                  embed.add_field(name="👤 提问者", value=user.mention, inline=False)
             
             q_display = user_prompt_text
             if len(q_display) > 1000 : q_display = q_display[:1000] + "..."
             embed.add_field(name=f"💬 {('你的' if is_private_chat else '')}问题:", value=f"```{q_display}```", inline=False)
             
-            if len(response_embed_text) <= 4050: 
+            if len(response_embed_text) <= 4050:
                 embed.description = response_embed_text
-            else: 
+            else:
                 embed.add_field(name="🤖 AI 回复 (部分):", value=response_embed_text[:1020] + "...", inline=False)
                 print(f"[AI DIALOGUE HANDLER] WARN: AI response for {channel.id} was very long and truncated for Embed field.")
 
             footer_model_info = dialogue_model
-            if system_prompt_for_api and not is_private_chat : footer_model_info += " (有系统提示)"
+            # 更新的 footer 文本逻辑
+            if effective_system_prompt and not is_private_chat : # 如果存在有效的系统提示 (可能包含知识库)
+                footer_model_info += " (有系统提示/知识库)"
+            elif effective_system_prompt and is_private_chat : # 私聊也可能有知识库影响
+                footer_model_info += " (受知识库影响)"
+
+
             if bot.user.avatar:
                 embed.set_footer(text=f"模型: {footer_model_info} | {bot.user.name}", icon_url=bot.user.display_avatar.url)
             else:
@@ -1499,7 +1553,7 @@ async def handle_ai_dialogue(message: discord.Message, is_private_chat: bool = F
             try: await channel.send(embed=embed)
             except Exception as send_e: print(f"[AI DIALOGUE HANDLER] Error sending embed to {channel.id}: {send_e}")
 
-        else: 
+        else:
             print(f"[AI DIALOGUE HANDLER ERROR] 'response_embed_text' was None/empty after no API error. HK: {history_key}")
             try: await channel.send("🤖 抱歉，AI 未能生成有效的回复内容。")
             except: pass
@@ -1872,6 +1926,36 @@ async def slash_help(interaction: discord.Interaction):
             "`/warn [用户] [原因]` - 手动警告用户 (累计3次踢出)\n"
             "`/unwarn [用户] [原因]` - 移除用户一次警告\n"  # <--- 确保这里有换行符
             "`/notify_member [用户] [消息内容]` - 通过机器人向指定成员发送私信。" # <--- 新增这行
+        ),
+        inline=False
+    )
+
+    # AI 对话与知识库
+    embed.add_field(
+        name="🤖 AI 对话与知识库 (/ai ...)", # 更新字段标题
+        value=(
+            "`... setup_dep_channel [频道] [模型] [系统提示]` - 设置AI直接对话频道\n"
+            "`... clear_dep_history` - 清除当前AI频道对话历史\n"
+            "`... create_private_chat [模型] [初始问题]` - 创建AI私聊频道\n"
+            "`... close_private_chat` - 关闭你的AI私聊频道\n"
+            "**AI知识库管理 (管理员):**\n" # 新增小标题
+            "`... kb_add [内容]` - 添加知识到AI知识库\n"
+            "`... kb_list` - 查看AI知识库条目\n"
+            "`... kb_remove [序号]` - 移除指定知识条目\n"
+            "`... kb_clear` - 清空服务器AI知识库"
+        ),
+        inline=False
+    )
+
+    # FAQ/帮助系统
+    embed.add_field(
+        name="❓ FAQ/帮助 (/faq ...)",
+        value=(
+            "`... search [关键词]` - 搜索FAQ/帮助信息\n"
+            "**管理员指令:**\n"
+            "`... add [关键词] [答案]` - 添加新的FAQ条目\n"
+            "`... remove [关键词]` - 移除FAQ条目\n"
+            "`... list` - 列出所有FAQ关键词"
         ),
         inline=False
     )
@@ -2401,6 +2485,100 @@ async def ai_setup_dep_channel_error(interaction: discord.Interaction, error: ap
         print(f"[AI SETUP ERROR] /ai setup_dep_channel: {error}")
         await interaction.response.send_message(f"设置AI频道时发生错误: {type(error).__name__}", ephemeral=True)
 
+# --- Command: /ai kb_add ---
+@ai_group.command(name="kb_add", description="[管理员] 添加一条知识到服务器的AI知识库")
+@app_commands.describe(content="要添加的知识内容 (例如：服务器规则、常见问题解答)")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def ai_kb_add(interaction: discord.Interaction, content: str):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("此命令只能在服务器内使用。", ephemeral=True)
+        return
+
+    if len(content) > MAX_KB_ENTRY_LENGTH: # 使用之前定义的常量
+        await interaction.response.send_message(f"❌ 内容过长，单个知识条目不能超过 {MAX_KB_ENTRY_LENGTH} 个字符。", ephemeral=True)
+        return
+    if len(content.strip()) < 10: 
+        await interaction.response.send_message(f"❌ 内容过短，请输入有意义的知识条目 (至少10字符)。", ephemeral=True)
+        return
+
+    # 确保 guild_knowledge_bases 已在文件顶部定义
+    guild_kb = guild_knowledge_bases.setdefault(guild.id, [])
+    if len(guild_kb) >= MAX_KB_ENTRIES_PER_GUILD: # 使用之前定义的常量
+        await interaction.response.send_message(f"❌ 服务器知识库已满 ({len(guild_kb)}/{MAX_KB_ENTRIES_PER_GUILD} 条)。请先移除一些旧条目。", ephemeral=True)
+        return
+
+    guild_kb.append(content.strip())
+    print(f"[AI KB] Guild {guild.id}: User {interaction.user.id} added entry. New count: {len(guild_kb)}")
+    await interaction.response.send_message(f"✅ 已成功添加知识条目到服务器AI知识库 (当前共 {len(guild_kb)} 条)。\n内容预览: ```{content[:150]}{'...' if len(content)>150 else ''}```", ephemeral=True)
+
+# --- Command: /ai kb_list ---
+@ai_group.command(name="kb_list", description="[管理员] 列出当前服务器AI知识库中的条目")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def ai_kb_list(interaction: discord.Interaction):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("此命令只能在服务器内使用。", ephemeral=True)
+        return
+
+    guild_kb = guild_knowledge_bases.get(guild.id, [])
+    if not guild_kb:
+        await interaction.response.send_message("ℹ️ 当前服务器的AI知识库是空的。", ephemeral=True)
+        return
+
+    embed = discord.Embed(title=f"服务器AI知识库 - {guild.name}", color=discord.Color.blue(), timestamp=discord.utils.utcnow())
+    
+    description_parts = [f"当前共有 **{len(guild_kb)}** 条知识。显示前 {min(len(guild_kb), MAX_KB_DISPLAY_ENTRIES)} 条：\n"] # 使用常量
+    for i, entry in enumerate(guild_kb[:MAX_KB_DISPLAY_ENTRIES]): # 使用常量
+        preview = entry[:80] + ('...' if len(entry) > 80 else '') 
+        description_parts.append(f"**{i+1}.** ```{preview}```")
+    
+    if len(guild_kb) > MAX_KB_DISPLAY_ENTRIES: # 使用常量
+        description_parts.append(f"\n*还有 {len(guild_kb) - MAX_KB_DISPLAY_ENTRIES} 条未在此处完整显示。*")
+    
+    embed.description = "\n".join(description_parts)
+    embed.set_footer(text=f"使用 /ai kb_remove [序号] 来移除条目。")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# --- Command: /ai kb_remove ---
+@ai_group.command(name="kb_remove", description="[管理员] 从服务器AI知识库中移除指定序号的条目")
+@app_commands.describe(index="要移除的知识条目的序号 (从 /ai kb_list 中获取)")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def ai_kb_remove(interaction: discord.Interaction, index: int):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("此命令只能在服务器内使用。", ephemeral=True)
+        return
+
+    guild_kb = guild_knowledge_bases.get(guild.id, [])
+    if not guild_kb:
+        await interaction.response.send_message("ℹ️ 当前服务器的AI知识库是空的，无法移除。", ephemeral=True)
+        return
+
+    if not (1 <= index <= len(guild_kb)):
+        await interaction.response.send_message(f"❌ 无效的序号。请输入 1 到 {len(guild_kb)} 之间的数字。", ephemeral=True)
+        return
+
+    removed_entry = guild_kb.pop(index - 1) 
+    print(f"[AI KB] Guild {guild.id}: User {interaction.user.id} removed entry #{index}. New count: {len(guild_kb)}")
+    await interaction.response.send_message(f"✅ 已成功从知识库中移除第 **{index}** 条知识。\n被移除内容预览: ```{removed_entry[:150]}{'...' if len(removed_entry)>150 else ''}```", ephemeral=True)
+
+# --- Command: /ai kb_clear ---
+@ai_group.command(name="kb_clear", description="[管理员] 清空当前服务器的所有AI知识库条目")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def ai_kb_clear(interaction: discord.Interaction):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("此命令只能在服务器内使用。", ephemeral=True)
+        return
+
+    if guild.id in guild_knowledge_bases and guild_knowledge_bases[guild.id]:
+        count_cleared = len(guild_knowledge_bases[guild.id])
+        guild_knowledge_bases[guild.id] = [] 
+        print(f"[AI KB] Guild {guild.id}: User {interaction.user.id} cleared all {count_cleared} knowledge base entries.")
+        await interaction.response.send_message(f"✅ 已成功清空服务器AI知识库中的全部 **{count_cleared}** 条知识。", ephemeral=True)
+    else:
+        await interaction.response.send_message("ℹ️ 当前服务器的AI知识库已经是空的。", ephemeral=True)
 # --- Command: /ai clear_dep_history ---
 @ai_group.command(name="clear_dep_history", description="清除当前AI直接对话频道的对话历史")
 async def ai_clear_dep_history(interaction: discord.Interaction):
@@ -2603,6 +2781,154 @@ async def ai_close_private_chat(interaction: discord.Interaction):
 # 为了确保它被添加，我们暂时放在这里，但理想位置是在所有指令定义完后，机器人启动前。
 # 如果你已经在其他地方有 bot.tree.add_command(manage_group) 等，就和它们放在一起。
 # bot.tree.add_command(ai_group) # 我们会在文件末尾统一添加
+
+# --- (在你所有指令组如 manage_group, voice_group, ai_group 定义完成之后，但在 bot.tree.add_command 系列语句之前) ---
+
+# --- 新增：FAQ/帮助 指令组 ---
+faq_group = app_commands.Group(name="faq", description="服务器FAQ与帮助信息管理和查询")
+
+# --- Command: /faq add ---
+@faq_group.command(name="add", description="[管理员] 添加一个新的FAQ条目 (关键词和答案)")
+@app_commands.describe(
+    keyword="用户搜索时使用的关键词 (简短，唯一)",
+    answer="对应关键词的答案/帮助信息"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def faq_add(interaction: discord.Interaction, keyword: str, answer: str):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("此命令只能在服务器内使用。", ephemeral=True)
+        return
+
+    keyword = keyword.lower().strip() 
+    if not keyword:
+        await interaction.response.send_message("❌ 关键词不能为空。", ephemeral=True)
+        return
+    if len(keyword) > MAX_FAQ_KEYWORD_LENGTH: # 使用之前定义的常量
+        await interaction.response.send_message(f"❌ 关键词过长 (最多 {MAX_FAQ_KEYWORD_LENGTH} 字符)。", ephemeral=True)
+        return
+    if len(answer) > MAX_FAQ_ANSWER_LENGTH: # 使用之前定义的常量
+        await interaction.response.send_message(f"❌ 答案内容过长 (最多 {MAX_FAQ_ANSWER_LENGTH} 字符)。", ephemeral=True)
+        return
+    if len(answer.strip()) < 10:
+         await interaction.response.send_message(f"❌ 答案内容过短 (至少10字符)。", ephemeral=True)
+         return
+
+    # 确保 server_faqs 已在文件顶部定义
+    guild_faqs = server_faqs.setdefault(guild.id, {})
+    if keyword in guild_faqs:
+        await interaction.response.send_message(f"⚠️ 关键词 **'{keyword}'** 已存在。如需修改，请先移除旧条目。", ephemeral=True)
+        return
+    if len(guild_faqs) >= MAX_FAQ_ENTRIES_PER_GUILD: # 使用之前定义的常量
+        await interaction.response.send_message(f"❌ 服务器FAQ条目已达上限 ({len(guild_faqs)}/{MAX_FAQ_ENTRIES_PER_GUILD} 条)。", ephemeral=True)
+        return
+
+    guild_faqs[keyword] = answer.strip()
+    print(f"[FAQ] Guild {guild.id}: User {interaction.user.id} added FAQ for keyword '{keyword}'.")
+    await interaction.response.send_message(f"✅ FAQ 条目已添加！\n关键词: **{keyword}**\n答案预览: ```{answer[:150]}{'...' if len(answer)>150 else ''}```", ephemeral=True)
+
+# --- Command: /faq remove ---
+@faq_group.command(name="remove", description="[管理员] 移除一个FAQ条目")
+@app_commands.describe(keyword="要移除的FAQ条目的关键词")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def faq_remove(interaction: discord.Interaction, keyword: str):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("此命令只能在服务器内使用。", ephemeral=True)
+        return
+
+    keyword = keyword.lower().strip()
+    guild_faqs = server_faqs.get(guild.id, {})
+
+    if keyword not in guild_faqs:
+        await interaction.response.send_message(f"❌ 未找到关键词为 **'{keyword}'** 的FAQ条目。", ephemeral=True)
+        return
+
+    removed_answer = guild_faqs.pop(keyword)
+    if not guild_faqs: 
+        if guild.id in server_faqs:
+            del server_faqs[guild.id]
+
+    print(f"[FAQ] Guild {guild.id}: User {interaction.user.id} removed FAQ for keyword '{keyword}'.")
+    await interaction.response.send_message(f"✅ 已成功移除关键词为 **'{keyword}'** 的FAQ条目。\n被移除答案预览: ```{removed_answer[:150]}{'...' if len(removed_answer)>150 else ''}```", ephemeral=True)
+
+# --- Command: /faq list ---
+@faq_group.command(name="list", description="[管理员] 列出所有FAQ关键词和部分答案")
+@app_commands.checks.has_permissions(manage_guild=True) 
+async def faq_list(interaction: discord.Interaction):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("此命令只能在服务器内使用。", ephemeral=True)
+        return
+
+    guild_faqs = server_faqs.get(guild.id, {})
+    if not guild_faqs:
+        await interaction.response.send_message("ℹ️ 当前服务器的FAQ列表是空的。", ephemeral=True)
+        return
+
+    embed = discord.Embed(title=f"服务器FAQ列表 - {guild.name}", color=discord.Color.teal(), timestamp=discord.utils.utcnow())
+    
+    description_parts = [f"当前共有 **{len(guild_faqs)}** 条FAQ。显示前 {min(len(guild_faqs), MAX_FAQ_LIST_DISPLAY)} 条：\n"] # 使用常量
+    count = 0
+    for kw, ans in guild_faqs.items():
+        if count >= MAX_FAQ_LIST_DISPLAY: # 使用常量
+            break
+        ans_preview = ans[:60] + ('...' if len(ans) > 60 else '')
+        description_parts.append(f"🔑 **{kw}**: ```{ans_preview}```")
+        count += 1
+    
+    if len(guild_faqs) > MAX_FAQ_LIST_DISPLAY: # 使用常量
+        description_parts.append(f"\n*还有 {len(guild_faqs) - MAX_FAQ_LIST_DISPLAY} 条未在此处完整显示。*")
+    
+    embed.description = "\n".join(description_parts)
+    embed.set_footer(text="用户可使用 /faq search <关键词> 来查询。")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# --- Command: /faq search (对所有用户开放) ---
+@faq_group.command(name="search", description="搜索FAQ/帮助信息")
+@app_commands.describe(keyword="你想要查询的关键词")
+async def faq_search(interaction: discord.Interaction, keyword: str):
+    guild = interaction.guild
+    if not guild: 
+        await interaction.response.send_message("此命令似乎不在服务器中执行。", ephemeral=True)
+        return
+
+    keyword = keyword.lower().strip()
+    guild_faqs = server_faqs.get(guild.id, {})
+
+    if not guild_faqs:
+        await interaction.response.send_message("ℹ️ 本服务器尚未配置FAQ信息。", ephemeral=True)
+        return
+
+    answer = guild_faqs.get(keyword)
+
+    if not answer:
+        possible_matches = []
+        for kw, ans_val in guild_faqs.items():
+            if keyword in kw or kw in keyword: 
+                possible_matches.append((kw, ans_val))
+        
+        if len(possible_matches) == 1: 
+            answer = possible_matches[0][1]
+            keyword = possible_matches[0][0] 
+        elif len(possible_matches) > 1:
+            match_list_str = "\n".join([f"- `{match[0]}`" for match in possible_matches[:5]]) 
+            await interaction.response.send_message(f"🤔 找到了多个可能的匹配项，请尝试更精确的关键词：\n{match_list_str}", ephemeral=True)
+            return
+
+    if answer:
+        embed = discord.Embed(
+            title=f"💡 FAQ: {keyword.capitalize()}",
+            description=answer,
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"由 {guild.name} 提供")
+        await interaction.response.send_message(embed=embed, ephemeral=False) 
+    else:
+        await interaction.response.send_message(f"😕 未找到与 **'{keyword}'**相关的FAQ信息。请尝试其他关键词或联系管理员。", ephemeral=True)
+
+# --- FAQ/帮助 指令组结束 ---
 
 # --- Management Command Group Definitions ---
 # manage_group = app_commands.Group(...)
@@ -3310,6 +3636,7 @@ async def voice_claim(interaction: discord.Interaction):
 bot.tree.add_command(manage_group)
 bot.tree.add_command(voice_group)
 bot.tree.add_command(ai_group)
+bot.tree.add_command(faq_group)
 
 # --- Run the Bot ---
 if __name__ == "__main__":
