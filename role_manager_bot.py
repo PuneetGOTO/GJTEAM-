@@ -5,6 +5,7 @@ from discord import app_commands, ui # Added ui
 from discord.ext import commands
 from discord.utils import get
 import os
+from dotenv import load_dotenv
 import time # 用于计算 API 延迟
 import datetime
 import asyncio
@@ -23,6 +24,10 @@ import html
 from collections import deque
 import sys
 
+# 在尝试获取环境变量之前加载 .env 文件
+# 指定 .env 文件的路径
+dotenv_path = '/etc/discord-bot/gjteam.env' # 或者你可以创建一个在项目根目录的 .env 文件用于本地开发
+load_dotenv(dotenv_path=dotenv_path)
 
 # --- Configuration ---
 # !!! 重要：从环境变量加载 Bot Token !!!
