@@ -598,7 +598,7 @@ MOD_ALERT_ROLE_IDS = [
 PUBLIC_WARN_LOG_CHANNEL_ID = 1374390176591122582 # <--- 替换! 示例 ID
 
 # !!! 重要：替换成你的启动通知频道ID !!!
-STARTUP_MESSAGE_CHANNEL_ID = 1374372204531159081 # <--- 替换! 示例 ID (例如: 138000000000000000)
+STARTUP_MESSAGE_CHANNEL_ID = 1374390176591122582 # <--- 替换! 示例 ID (例如: 138000000000000000)
                                 # 如果为 0 或未配置，则不发送启动消息
 
 # --- Bad Word Detection Config & Storage (In-Memory) ---
