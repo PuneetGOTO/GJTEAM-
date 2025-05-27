@@ -553,6 +553,32 @@ class CreateTicketView(ui.View):
 # --- 新增：机器人白名单文件存储 (可选, 但推荐) ---
 BOT_WHITELIST_FILE = "bot_whitelist.json" # <--- 新增这一行 (如果使用文件存储)
 
+# --- 经济系统配置 ---
+ECONOMY_ENABLED = True  # 经济系统全局开关
+ECONOMY_CURRENCY_NAME = "金币"
+ECONOMY_CURRENCY_SYMBOL = "💰"
+ECONOMY_DEFAULT_BALANCE = 100  # 新用户首次查询时的默认余额
+ECONOMY_CHAT_EARN_DEFAULT_AMOUNT = 1
+ECONOMY_CHAT_EARN_DEFAULT_COOLDOWN_SECONDS = 60  # 1 分钟
+ECONOMY_DATA_FILE = "economy_data.json"
+ECONOMY_MAX_SHOP_ITEMS_PER_PAGE = 5 # 减少以便更好地显示
+ECONOMY_MAX_LEADERBOARD_USERS = 10
+ECONOMY_TRANSFER_TAX_PERCENT = 1 # 示例: 转账收取 1% 手续费。设为 0 则无手续费。
+ECONOMY_MIN_TRANSFER_AMOUNT = 10 # 最低转账金额
+
+# --- 经济系统数据存储 (内存中，通过 JSON 持久化) ---
+# {guild_id: {user_id: balance}}
+user_balances: Dict[int, Dict[int, int]] = {}
+
+# {guild_id: {item_slug: {"name": str, "price": int, "description": str, "role_id": Optional[int], "stock": int (-1 代表无限), "purchase_message": Optional[str]}}}
+shop_items: Dict[int, Dict[str, Dict[str, Any]]] = {}
+
+# {guild_id: {"chat_earn_amount": int, "chat_earn_cooldown": int}} # 存储覆盖默认值的设置
+guild_economy_settings: Dict[int, Dict[str, int]] = {}
+
+# {guild_id: {user_id: last_earn_timestamp_float}}
+last_chat_earn_times: Dict[int, Dict[int, float]] = {}
+
 
 # --- Spam Detection & Mod Alert Config ---
 SPAM_COUNT_THRESHOLD = 5       # 用户刷屏阈值：消息数量
@@ -1035,6 +1061,122 @@ async def generate_ticket_transcript_html(channel: discord.TextChannel) -> Optio
     """
     return full_html_template.strip()
 
+# --- 经济系统：持久化 ---
+def load_economy_data():
+    global user_balances, shop_items, guild_economy_settings, last_chat_earn_times
+    if not ECONOMY_ENABLED:
+        return
+    try:
+        if os.path.exists(ECONOMY_DATA_FILE):
+            with open(ECONOMY_DATA_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # 将字符串键转换回整数类型的 guild_id 和 user_id
+                user_balances = {int(gid): {int(uid): bal for uid, bal in u_bals.items()} for gid, u_bals in data.get("user_balances", {}).items()}
+                shop_items = {int(gid): items for gid, items in data.get("shop_items", {}).items()} # item_slug 保持为字符串
+                guild_economy_settings = {int(gid): settings for gid, settings in data.get("guild_economy_settings", {}).items()}
+                last_chat_earn_times = {int(gid): {int(uid): ts for uid, ts in u_times.items()} for gid, u_times in data.get("last_chat_earn_times", {}).items()}
+                print(f"[经济系统] 成功从 {ECONOMY_DATA_FILE} 加载数据。")
+    except json.JSONDecodeError:
+        print(f"[经济系统错误] 解析 {ECONOMY_DATA_FILE} 的 JSON 失败。将以空数据启动。")
+    except Exception as e:
+        print(f"[经济系统错误] 加载经济数据失败: {e}")
+
+def save_economy_data():
+    if not ECONOMY_ENABLED:
+        return
+    try:
+        # 准备要保存到 JSON 的数据 (确保键是字符串，如果它们是从整数转换过来的)
+        data_to_save = {
+            "user_balances": {str(gid): {str(uid): bal for uid, bal in u_bals.items()} for gid, u_bals in user_balances.items()},
+            "shop_items": {str(gid): items for gid, items in shop_items.items()},
+            "guild_economy_settings": {str(gid): settings for gid, settings in guild_economy_settings.items()},
+            "last_chat_earn_times": {str(gid): {str(uid): ts for uid, ts in u_times.items()} for gid, u_times in last_chat_earn_times.items()}
+        }
+        with open(ECONOMY_DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+        # print(f"[经济系统] 成功保存数据到 {ECONOMY_DATA_FILE}") # 每次保存都打印可能过于频繁
+    except Exception as e:
+        print(f"[经济系统错误] 保存经济数据失败: {e}")
+
+# --- 经济系统：辅助函数 ---
+def get_user_balance(guild_id: int, user_id: int) -> int:
+    return user_balances.get(guild_id, {}).get(user_id, ECONOMY_DEFAULT_BALANCE)
+
+def update_user_balance(guild_id: int, user_id: int, amount: int, is_delta: bool = True) -> bool:
+    """
+    更新用户余额。
+    如果 is_delta 为 True，则 amount 会被加到或从当前余额中减去。
+    如果 is_delta 为 False，则 amount 成为新的余额。
+    如果操作成功（例如，用 delta 更新时不会导致余额低于零），则返回 True，否则返回 False。
+    """
+    if guild_id not in user_balances:
+        user_balances[guild_id] = {}
+    
+    current_balance = user_balances[guild_id].get(user_id, ECONOMY_DEFAULT_BALANCE)
+
+    if is_delta:
+        if current_balance + amount < 0:
+            # 如果尝试花费超过现有金额，则操作失败
+            return False 
+        user_balances[guild_id][user_id] = current_balance + amount
+    else: # 设置绝对余额
+        if amount < 0: amount = 0 # 余额不能为负
+        user_balances[guild_id][user_id] = amount
+    
+    # print(f"[经济系统] 用户 {user_id} 在服务器 {guild_id} 的余额已更新: {user_balances[guild_id][user_id]}")
+    # save_economy_data() # 每次余额更新都保存可能过于频繁，应在特定事件后保存。
+    return True
+
+def get_guild_chat_earn_config(guild_id: int) -> Dict[str, int]:
+    defaults = {
+        "amount": ECONOMY_CHAT_EARN_DEFAULT_AMOUNT,
+        "cooldown": ECONOMY_CHAT_EARN_DEFAULT_COOLDOWN_SECONDS
+    }
+    if guild_id in guild_economy_settings:
+        config = guild_economy_settings[guild_id]
+        return {
+            "amount": config.get("chat_earn_amount", defaults["amount"]), # 确保键名匹配
+            "cooldown": config.get("chat_earn_cooldown", defaults["cooldown"]) # 确保键名匹配
+        }
+    return defaults
+
+def get_item_slug(item_name: str) -> str:
+    return "_".join(item_name.lower().split()).strip() # 简单的 slug：小写，空格转下划线
+
+async def grant_item_purchase(interaction: discord.Interaction, user: discord.Member, item_data: Dict[str, Any]):
+    """处理购买物品的效果。"""
+    guild = interaction.guild
+    
+    # 如果指定，则授予身份组
+    role_id = item_data.get("role_id")
+    if role_id:
+        role = guild.get_role(role_id)
+        if role:
+            if role not in user.roles:
+                try:
+                    await user.add_roles(role, reason=f"从商店购买了 '{item_data['name']}'")
+                    # print(f"[经济系统] 身份组 '{role.name}' 已授予给用户 {user.name} (物品: '{item_data['name']}')。")
+                except discord.Forbidden:
+                    await interaction.followup.send(f"⚠️ 我无法为你分配 **{role.name}** 身份组，请联系管理员检查我的权限和身份组层级。", ephemeral=True)
+                except Exception as e:
+                    await interaction.followup.send(f"⚠️ 分配身份组时发生错误: {e}", ephemeral=True)
+            # else: # 用户已拥有该身份组
+                # print(f"[经济系统] 用户 {user.name} 已拥有物品 '{item_data['name']}' 的身份组。")
+        else:
+            await interaction.followup.send(f"⚠️ 物品 **{item_data['name']}** 关联的身份组ID `{role_id}` 无效或已被删除，请联系管理员。", ephemeral=True)
+            print(f"[经济系统错误] 服务器 {guild.id} 的物品 '{item_data['name']}' 关联的身份组ID {role_id} 无效。")
+
+    # 如果指定，则发送自定义购买消息
+    purchase_message = item_data.get("purchase_message")
+    if purchase_message:
+        try:
+            # 替换消息中的占位符
+            formatted_message = purchase_message.replace("{user}", user.mention).replace("{item_name}", item_data['name'])
+            await user.send(f"🎉 关于你在 **{guild.name}** 商店的购买：\n{formatted_message}")
+        except discord.Forbidden:
+            await interaction.followup.send(f"ℹ️ 你购买了 **{item_data['name']}**！但我无法私信你发送额外信息（可能关闭了私信）。", ephemeral=True)
+        except Exception as e:
+            print(f"[经济系统错误] 发送物品 '{item_data['name']}' 的购买私信给用户 {user.id} 时出错: {e}")
 # --- Ticket Tool UI Views ---
 
 # View for the button to close a ticket
@@ -1047,6 +1189,11 @@ async def generate_ticket_transcript_html(channel: discord.TextChannel) -> Optio
 @bot.event
 async def on_ready():
     print(f'以 {bot.user.name} ({bot.user.id}) 身份登录')
+
+    if ECONOMY_ENABLED: # 添加此块
+        load_economy_data()
+        print("[经济系统] 系统已初始化。")
+
     print('正在同步应用程序命令...')
     try:
         synced = await bot.tree.sync()
@@ -1852,6 +1999,41 @@ async def on_message(message: discord.Message):
                 except Exception as warn_err_spam: print(f"   - Error sending user spam warning: {warn_err_spam}")
             return 
 
+                # --- 经济系统：聊天赚钱 (在末尾添加此部分) ---
+    if ECONOMY_ENABLED and \
+       message.guild and \
+       not message.author.bot and \
+       not message.content.startswith(COMMAND_PREFIX) and \
+       not message.content.startswith('/') and \
+       not (message.channel.id in ai_dep_channels_config or message.channel.id in active_private_ai_chats):
+        # 仅对实际内容（不仅仅是短消息或没有文本的贴纸）进行奖励
+        if len(message.content) > 5 or message.attachments or message.stickers: # 最小长度或包含媒体
+            guild_id = message.guild.id
+            user_id = message.author.id
+            
+            config = get_guild_chat_earn_config(guild_id)
+            earn_amount = config["amount"]
+            cooldown_seconds = config["cooldown"]
+
+            if earn_amount > 0:
+                now = time.time()
+                
+                if guild_id not in last_chat_earn_times:
+                    last_chat_earn_times[guild_id] = {}
+                
+                last_earn = last_chat_earn_times[guild_id].get(user_id, 0)
+
+                if now - last_earn > cooldown_seconds:
+                    if update_user_balance(guild_id, user_id, earn_amount):
+                        last_chat_earn_times[guild_id][user_id] = now
+                        # print(f"[经济系统] 用户 {user_id} 在服务器 {guild_id} 通过聊天赚取了 {earn_amount} {ECONOMY_CURRENCY_NAME}。")
+                        # 可选：发送非常细微的确认或记录，但避免刷屏聊天
+                        # await message.add_reaction("🪙") # 示例：细微的反应 - 可能过多
+                        # save_economy_data() # 每次赚钱都保存可能导致 I/O 过于密集。
+    
+    # --- (如果你在末尾有 bot.process_commands(message)，请保留它) ---
+    # pass # 如果没有 process_commands
+
     # --- 5. Bot 刷屏检测逻辑 (如果需要，并且确保它在你原有逻辑中是工作的) ---
     # 注意：这个逻辑块通常应该在 on_message 的最开始处理，因为它只针对其他机器人。
     # 但为了保持你原有结构的顺序，我先放在这里。如果你的机器人不应该响应其他机器人刷屏，
@@ -2075,6 +2257,37 @@ async def slash_help(interaction: discord.Interaction):
             "`... ai豁免-添加频道 [频道]` - 添加频道到AI检测豁免\n"
             "`... ai豁免-移除频道 [频道]` - 从AI豁免移除频道\n"
             "`... ai豁免-查看列表` - 查看当前AI豁免列表"
+        ),
+        inline=False
+    )
+
+
+    # --- 将经济系统指令添加到帮助信息 ---
+    embed.add_field(
+        name=f"{ECONOMY_CURRENCY_SYMBOL} {ECONOMY_CURRENCY_NAME}系统 (/eco ...)",
+        value=(
+            f"`... balance ([用户])` - 查看你或他人的{ECONOMY_CURRENCY_NAME}余额。\n"
+            f"`... transfer <用户> <金额>` - 向其他用户转账{ECONOMY_CURRENCY_NAME}。\n"
+            f"`... shop` - 查看商店中的可用物品。\n"
+            f"`... buy <物品名称或ID>` - 从商店购买物品。\n"
+            f"`... leaderboard` - 显示{ECONOMY_CURRENCY_NAME}排行榜。"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚙️ 高级管理指令 (/管理 ...)",
+        value=(
+            "`... 票据设定 ...`\n" # 保持此项简洁
+            # ... (其他现有的管理员指令) ...
+            f"`... eco_admin give <用户> <金额>` - 给予用户{ECONOMY_CURRENCY_NAME}。\n"
+            f"`... eco_admin take <用户> <金额>` - 移除用户{ECONOMY_CURRENCY_NAME}。\n"
+            f"`... eco_admin set <用户> <金额>` - 设置用户{ECONOMY_CURRENCY_NAME}。\n"
+            f"`... eco_admin config_chat_earn <金额> <冷却>` - 配置聊天收益。\n"
+            f"`... eco_admin add_shop_item <名称> <价格> ...` - 添加商店物品。\n"
+            f"`... eco_admin remove_shop_item <物品>` - 移除商店物品。\n"
+            f"`... eco_admin edit_shop_item <物品> ...` - 编辑商店物品。"
+            # ... (你现有的 /管理 帮助信息的其余部分) ...
         ),
         inline=False
     )
@@ -3793,6 +4006,475 @@ async def voice_claim(interaction: discord.Interaction):
     except discord.Forbidden: await interaction.followup.send(f"⚙️ 获取房主权限失败：机器人权限不足。", ephemeral=True)
     except Exception as e: print(f"执行 /语音 房主 时出错: {e}"); await interaction.followup.send(f"⚙️ 获取房主权限时发生未知错误: {e}", ephemeral=True)
 
+# --- 经济系统斜杠指令组 ---
+eco_group = app_commands.Group(name="eco", description=f"与{ECONOMY_CURRENCY_NAME}和商店相关的指令。")
+
+@eco_group.command(name="balance", description=f"查看你或其他用户的{ECONOMY_CURRENCY_NAME}余额。")
+@app_commands.describe(user=f"(可选) 要查看其余额的用户。")
+async def eco_balance(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
+    
+    target_user = user if user else interaction.user
+    guild_id = interaction.guild_id
+
+    if not guild_id:
+        await interaction.response.send_message("此命令只能在服务器中使用。", ephemeral=True)
+        return
+        
+    if target_user.bot:
+        await interaction.response.send_message(f"🤖 机器人没有{ECONOMY_CURRENCY_NAME}余额。", ephemeral=True)
+        return
+
+    balance = get_user_balance(guild_id, target_user.id)
+    
+    embed = discord.Embed(
+        title=f"{ECONOMY_CURRENCY_SYMBOL} {target_user.display_name}的余额",
+        description=f"**{balance}** {ECONOMY_CURRENCY_NAME}",
+        color=discord.Color.gold()
+    )
+    if target_user.avatar:
+        embed.set_thumbnail(url=target_user.display_avatar.url)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True if user else False)
+
+@eco_group.command(name="transfer", description=f"向其他用户转账{ECONOMY_CURRENCY_NAME}。")
+@app_commands.describe(
+    receiver=f"接收{ECONOMY_CURRENCY_NAME}的用户。",
+    amount=f"要转账的{ECONOMY_CURRENCY_NAME}数量。"
+)
+async def eco_transfer(interaction: discord.Interaction, receiver: discord.Member, amount: app_commands.Range[int, ECONOMY_MIN_TRANSFER_AMOUNT, None]):
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    guild_id = interaction.guild_id
+    sender = interaction.user
+
+    if not guild_id:
+        await interaction.followup.send("此命令只能在服务器中使用。", ephemeral=True); return
+    if sender.id == receiver.id:
+        await interaction.followup.send(f"❌ 你不能给自己转账。", ephemeral=True); return
+    if receiver.bot:
+        await interaction.followup.send(f"❌ 你不能向机器人转账。", ephemeral=True); return
+    if amount <= 0:
+        await interaction.followup.send(f"❌ 转账金额必须大于0。", ephemeral=True); return
+
+    sender_balance = get_user_balance(guild_id, sender.id)
+    
+    tax_amount = 0
+    if ECONOMY_TRANSFER_TAX_PERCENT > 0:
+        tax_amount = int(amount * (ECONOMY_TRANSFER_TAX_PERCENT / 100))
+        if tax_amount < 1 and amount > 0 : tax_amount = 1 # 如果启用了手续费且金额为正，则手续费至少为1
+
+    total_deduction = amount + tax_amount
+
+    if sender_balance < total_deduction:
+        await interaction.followup.send(f"❌ 你的{ECONOMY_CURRENCY_NAME}不足以完成转账（需要 {total_deduction} {ECONOMY_CURRENCY_NAME}，包含手续费）。", ephemeral=True)
+        return
+
+    if update_user_balance(guild_id, sender.id, -total_deduction) and \
+       update_user_balance(guild_id, receiver.id, amount):
+        save_economy_data() # 成功交易后保存
+        
+        response_msg = f"✅ 你已成功向 {receiver.mention} 转账 **{amount}** {ECONOMY_CURRENCY_NAME}。"
+        if tax_amount > 0:
+            response_msg += f"\n手续费: **{tax_amount}** {ECONOMY_CURRENCY_NAME}。"
+        await interaction.followup.send(response_msg, ephemeral=True)
+
+        try:
+            dm_embed = discord.Embed(
+                title=f"{ECONOMY_CURRENCY_SYMBOL} 你收到一笔转账！",
+                description=f"{sender.mention} 向你转账了 **{amount}** {ECONOMY_CURRENCY_NAME}。",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            dm_embed.set_footer(text=f"来自服务器: {interaction.guild.name}")
+            await receiver.send(embed=dm_embed)
+        except discord.Forbidden:
+            await interaction.followup.send(f"ℹ️ 已成功转账，但无法私信通知 {receiver.mention} (TA可能关闭了私信)。",ephemeral=True)
+        except Exception as e:
+            print(f"[经济系统错误] 发送转账私信给 {receiver.id} 时出错: {e}")
+        
+        print(f"[经济系统] 转账: {sender.id} -> {receiver.id}, 金额: {amount}, 手续费: {tax_amount}, 服务器: {guild_id}")
+    else:
+        await interaction.followup.send(f"❌ 转账失败，发生内部错误。请重试或联系管理员。", ephemeral=True)
+
+@eco_group.command(name="shop", description=f"查看可用物品的商店。")
+async def eco_shop(interaction: discord.Interaction):
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
+    
+    guild_id = interaction.guild_id
+    if not guild_id:
+        await interaction.response.send_message("此命令只能在服务器中使用。", ephemeral=True)
+        return
+
+    guild_shop_items = shop_items.get(guild_id, {})
+    if not guild_shop_items:
+        await interaction.response.send_message(f"商店目前是空的。让管理员添加一些物品吧！", ephemeral=True)
+        return
+
+    embed = discord.Embed(title=f"{ECONOMY_CURRENCY_SYMBOL} {interaction.guild.name} 商店", color=discord.Color.blurple())
+    
+    item_list_str = []
+    for slug, item in guild_shop_items.items():
+        stock_info = f"(库存: {item['stock']})" if item.get('stock', -1) != -1 else "(无限库存)"
+        role_info = ""
+        if item.get("role_id"):
+            role = interaction.guild.get_role(item['role_id'])
+            role_info = f" (奖励身份组: {role.mention if role else '未知身份组'})"
+
+        item_list_str.append(
+            f"**{item['name']}** (`{slug}`) - {ECONOMY_CURRENCY_SYMBOL} **{item['price']}** {stock_info}\n"
+            f"> *{item.get('description', '无描述')}*{role_info}\n"
+        )
+    
+    if not item_list_str: # 如果 guild_shop_items 非空，理论上不应发生，但作为安全措施
+        await interaction.response.send_message(f"商店中没有可显示的物品。", ephemeral=True)
+        return
+
+    # 简单分页（如果物品过多，Discord embed description 有限制）
+    # 目前，仅显示所有或有限数量。对于大量物品，带按钮的视图会更好。
+    full_description = "\n".join(item_list_str)
+    if len(full_description) > 3900 : # 为标题/页脚留一些缓冲区
+        embed.description = "\n".join(item_list_str[:ECONOMY_MAX_SHOP_ITEMS_PER_PAGE]) + f"\n\n*还有更多物品未显示...*"
+    else:
+        embed.description = full_description
+        
+    embed.set_footer(text=f"使用 /eco buy <物品名称或ID> 来购买。")
+    await interaction.response.send_message(embed=embed, ephemeral=False)
+
+
+@eco_group.command(name="buy", description=f"从商店购买一件物品。")
+@app_commands.describe(item_identifier=f"要购买的物品的名称或ID (商店列表中的`ID`)。")
+async def eco_buy(interaction: discord.Interaction, item_identifier: str):
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    guild_id = interaction.guild_id
+    user = interaction.user
+
+    if not guild_id:
+        await interaction.followup.send("此命令只能在服务器中使用。", ephemeral=True); return
+
+    guild_shop_items = shop_items.get(guild_id, {})
+    item_slug_to_buy = get_item_slug(item_identifier) # 首先尝试 slug
+    item_to_buy_data = guild_shop_items.get(item_slug_to_buy)
+
+    if not item_to_buy_data: # 如果通过 slug 未找到，则尝试精确名称（不太可靠）
+        for slug, data_val in guild_shop_items.items():
+            if data_val['name'].lower() == item_identifier.lower():
+                item_to_buy_data = data_val
+                item_slug_to_buy = slug
+                break
+    
+    if not item_to_buy_data:
+        await interaction.followup.send(f"❌ 未在商店中找到名为或ID为 **'{item_identifier}'** 的物品。", ephemeral=True)
+        return
+
+    item_price = item_to_buy_data['price']
+    user_balance = get_user_balance(guild_id, user.id)
+
+    if user_balance < item_price:
+        await interaction.followup.send(f"❌ 你的{ECONOMY_CURRENCY_NAME}不足以购买 **{item_to_buy_data['name']}** (需要 {item_price}，你有 {user_balance})。", ephemeral=True)
+        return
+
+    # 检查库存
+    item_stock = item_to_buy_data.get("stock", -1)
+    if item_stock == 0: # 显式为 0 表示已售罄
+        await interaction.followup.send(f"❌ 抱歉，物品 **{item_to_buy_data['name']}** 已售罄。", ephemeral=True)
+        return
+
+    # 如果物品授予身份组，检查用户是否已拥有
+    granted_role_id = item_to_buy_data.get("role_id")
+    if granted_role_id and isinstance(user, discord.Member): # 确保 user 是 Member 对象
+        if discord.utils.get(user.roles, id=granted_role_id):
+            await interaction.followup.send(f"ℹ️ 你已经拥有物品 **{item_to_buy_data['name']}** 关联的身份组了。", ephemeral=True)
+            return
+
+
+    if update_user_balance(guild_id, user.id, -item_price):
+        # 如果不是无限库存，则更新库存
+        if item_stock != -1:
+            shop_items[guild_id][item_slug_to_buy]["stock"] = item_stock - 1
+        
+        save_economy_data() # 成功购买并更新库存后保存
+
+        await grant_item_purchase(interaction, user, item_to_buy_data) # 处理身份组授予和自定义消息
+        
+        await interaction.followup.send(f"🎉 恭喜！你已成功购买 **{item_to_buy_data['name']}**！", ephemeral=True)
+        print(f"[经济系统] 购买: 用户 {user.id} 在服务器 {guild_id} 以 {item_price} 购买了 '{item_to_buy_data['name']}'。")
+    else:
+        await interaction.followup.send(f"❌ 购买失败，发生内部错误。请重试或联系管理员。", ephemeral=True)
+
+@eco_group.command(name="leaderboard", description=f"显示服务器中{ECONOMY_CURRENCY_NAME}排行榜。")
+async def eco_leaderboard(interaction: discord.Interaction):
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
+
+    guild_id = interaction.guild_id
+    if not guild_id:
+        await interaction.response.send_message("此命令只能在服务器中使用。", ephemeral=True)
+        return
+
+    guild_balances = user_balances.get(guild_id, {})
+    if not guild_balances:
+        await interaction.response.send_message(f"本服务器还没有人拥有{ECONOMY_CURRENCY_NAME}记录。", ephemeral=True)
+        return
+
+    # 按余额降序排序用户。items() 返回 (user_id, balance)
+    sorted_users = sorted(guild_balances.items(), key=lambda item: item[1], reverse=True)
+    
+    embed = discord.Embed(
+        title=f"{ECONOMY_CURRENCY_SYMBOL} {interaction.guild.name} {ECONOMY_CURRENCY_NAME}排行榜",
+        color=discord.Color.gold()
+    )
+    
+    description_lines = []
+    rank_emojis = ["🥇", "🥈", "🥉"] 
+    
+    for i, (user_id, balance) in enumerate(sorted_users[:ECONOMY_MAX_LEADERBOARD_USERS]):
+        member = interaction.guild.get_member(user_id)
+        member_display = member.mention if member else f"用户ID({user_id})"
+        rank_prefix = rank_emojis[i] if i < len(rank_emojis) else f"**{i+1}.**"
+        description_lines.append(f"{rank_prefix} {member_display} - {ECONOMY_CURRENCY_SYMBOL} **{balance}**")
+        
+    if not description_lines:
+        embed.description = "排行榜当前为空。"
+    else:
+        embed.description = "\n".join(description_lines)
+        
+    embed.set_footer(text=f"显示前 {ECONOMY_MAX_LEADERBOARD_USERS} 名。")
+    await interaction.response.send_message(embed=embed, ephemeral=False)
+
+
+# --- 管理员经济系统指令组 (/管理 的子指令组) ---
+eco_admin_group = app_commands.Group(name="eco_admin", description=f"管理员经济系统管理指令。", parent=manage_group)
+
+@eco_admin_group.command(name="give", description=f"给予用户指定数量的{ECONOMY_CURRENCY_NAME}。")
+@app_commands.describe(user="要给予货币的用户。", amount=f"要给予的{ECONOMY_CURRENCY_NAME}数量。")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def eco_admin_give(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
+    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
+    guild_id = interaction.guild_id
+    if user.bot: await interaction.response.send_message(f"❌ 不能给机器人{ECONOMY_CURRENCY_NAME}。", ephemeral=True); return
+
+    if update_user_balance(guild_id, user.id, amount):
+        save_economy_data()
+        await interaction.response.send_message(f"✅ 已成功给予 {user.mention} **{amount}** {ECONOMY_CURRENCY_NAME}。\n其新余额为: {get_user_balance(guild_id, user.id)} {ECONOMY_CURRENCY_NAME}。", ephemeral=False)
+        print(f"[经济系统管理员] {interaction.user.id} 在服务器 {guild_id} 给予了 {user.id} {amount} {ECONOMY_CURRENCY_NAME}。")
+    else: await interaction.response.send_message(f"❌ 操作失败。", ephemeral=True)
+
+@eco_admin_group.command(name="take", description=f"从用户处移除指定数量的{ECONOMY_CURRENCY_NAME}。")
+@app_commands.describe(user="要移除其货币的用户。", amount=f"要移除的{ECONOMY_CURRENCY_NAME}数量。")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def eco_admin_take(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
+    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
+    guild_id = interaction.guild_id
+    if user.bot: await interaction.response.send_message(f"❌ 机器人没有{ECONOMY_CURRENCY_NAME}。", ephemeral=True); return
+
+    current_bal = get_user_balance(guild_id, user.id)
+    if current_bal < amount :
+        # 选项：只拿走他们拥有的？还是失败？为了明确，我们选择失败。
+        await interaction.response.send_message(f"❌ 用户 {user.mention} 只有 {current_bal} {ECONOMY_CURRENCY_NAME}，无法移除 {amount}。", ephemeral=True)
+        return
+
+    if update_user_balance(guild_id, user.id, -amount):
+        save_economy_data()
+        await interaction.response.send_message(f"✅ 已成功从 {user.mention} 处移除 **{amount}** {ECONOMY_CURRENCY_NAME}。\n其新余额为: {get_user_balance(guild_id, user.id)} {ECONOMY_CURRENCY_NAME}。", ephemeral=False)
+        print(f"[经济系统管理员] {interaction.user.id} 在服务器 {guild_id} 从 {user.id} 处移除了 {amount} {ECONOMY_CURRENCY_NAME}。")
+    else: await interaction.response.send_message(f"❌ 操作失败。", ephemeral=True)
+
+
+@eco_admin_group.command(name="set", description=f"设置用户{ECONOMY_CURRENCY_NAME}为指定数量。")
+@app_commands.describe(user="要设置其余额的用户。", amount=f"要设置的{ECONOMY_CURRENCY_NAME}数量。")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def eco_admin_set(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 0, None]):
+    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
+    guild_id = interaction.guild_id
+    if user.bot: await interaction.response.send_message(f"❌ 机器人没有{ECONOMY_CURRENCY_NAME}。", ephemeral=True); return
+
+    if update_user_balance(guild_id, user.id, amount, is_delta=False):
+        save_economy_data()
+        await interaction.response.send_message(f"✅ 已成功将 {user.mention} 的余额设置为 **{amount}** {ECONOMY_CURRENCY_NAME}。", ephemeral=False)
+        print(f"[经济系统管理员] {interaction.user.id} 在服务器 {guild_id} 将用户 {user.id} 的余额设置为 {amount}。")
+    else: await interaction.response.send_message(f"❌ 操作失败。", ephemeral=True)
+
+@eco_admin_group.command(name="config_chat_earn", description="配置聊天获取货币的金额和冷却时间。")
+@app_commands.describe(
+    amount=f"每条符合条件的聊天消息奖励的{ECONOMY_CURRENCY_NAME}数量 (0禁用)。",
+    cooldown_seconds="两次聊天奖励之间的冷却时间 (秒)。"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def eco_admin_config_chat_earn(interaction: discord.Interaction, amount: app_commands.Range[int, 0, None], cooldown_seconds: app_commands.Range[int, 5, None]):
+    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
+    guild_id = interaction.guild_id
+    
+    guild_economy_settings[guild_id] = {
+        "chat_earn_amount": amount,
+        "chat_earn_cooldown": cooldown_seconds
+    }
+    save_economy_data()
+    status = "启用" if amount > 0 else "禁用"
+    await interaction.response.send_message(
+        f"✅ 聊天赚取{ECONOMY_CURRENCY_NAME}已配置：\n"
+        f"- 状态: **{status}**\n"
+        f"- 每条消息奖励: **{amount}** {ECONOMY_CURRENCY_NAME}\n"
+        f"- 冷却时间: **{cooldown_seconds}** 秒",
+        ephemeral=True
+    )
+    print(f"[经济系统管理员] 服务器 {guild_id} 聊天赚钱配置已由 {interaction.user.id} 更新：金额={amount}, 冷却={cooldown_seconds}")
+
+@eco_admin_group.command(name="add_shop_item", description="向商店添加新物品。")
+@app_commands.describe(
+    name="物品的名称 (唯一)。",
+    price=f"物品的价格 ({ECONOMY_CURRENCY_NAME})。",
+    description="物品的简短描述。",
+    role="(可选) 购买此物品后授予的身份组。",
+    stock="(可选) 物品的库存数量 (-1 表示无限，默认为无限)。",
+    purchase_message="(可选) 购买成功后私信给用户的额外消息。"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def eco_admin_add_shop_item(
+    interaction: discord.Interaction, 
+    name: str, 
+    price: app_commands.Range[int, 0, None], 
+    description: str,
+    role: Optional[discord.Role] = None,
+    stock: Optional[int] = -1,
+    purchase_message: Optional[str] = None
+):
+    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
+    guild_id = interaction.guild_id
+    item_slug = get_item_slug(name)
+
+    if guild_id not in shop_items:
+        shop_items[guild_id] = {}
+    
+    if item_slug in shop_items[guild_id]:
+        await interaction.response.send_message(f"❌ 商店中已存在名为/ID为 **'{name}'** (`{item_slug}`) 的物品。", ephemeral=True)
+        return
+
+    shop_items[guild_id][item_slug] = {
+        "name": name,
+        "price": price,
+        "description": description,
+        "role_id": role.id if role else None,
+        "stock": stock if stock is not None else -1,
+        "purchase_message": purchase_message
+    }
+    save_economy_data()
+    await interaction.response.send_message(f"✅ 物品 **{name}** (`{item_slug}`) 已成功添加到商店！", ephemeral=True)
+    print(f"[经济系统管理员] 服务器 {guild_id} 物品已添加: {name} (Slug: {item_slug})，操作者: {interaction.user.id}")
+
+
+@eco_admin_group.command(name="remove_shop_item", description="从商店移除物品。")
+@app_commands.describe(item_identifier="要移除的物品的名称或ID。")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def eco_admin_remove_shop_item(interaction: discord.Interaction, item_identifier: str):
+    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
+    guild_id = interaction.guild_id
+    item_slug_to_remove = get_item_slug(item_identifier)
+    
+    item_removed_data = None
+    if guild_id in shop_items and item_slug_to_remove in shop_items[guild_id]:
+        item_removed_data = shop_items[guild_id].pop(item_slug_to_remove)
+    else: # 如果通过 slug 未找到，则尝试名称
+        found_by_name = False
+        for slug, data_val in shop_items.get(guild_id, {}).items():
+            if data_val['name'].lower() == item_identifier.lower():
+                item_removed_data = shop_items[guild_id].pop(slug)
+                item_slug_to_remove = slug # 更新 slug 以便记录
+                found_by_name = True
+                break
+        if not found_by_name:
+             await interaction.response.send_message(f"❌ 未在商店中找到名为或ID为 **'{item_identifier}'** 的物品。", ephemeral=True)
+             return
+
+    if item_removed_data:
+        if not shop_items[guild_id]: # 如果移除了最后一个物品，则删除服务器条目
+            del shop_items[guild_id]
+        save_economy_data()
+        await interaction.response.send_message(f"✅ 物品 **{item_removed_data['name']}** (`{item_slug_to_remove}`) 已成功从商店移除。", ephemeral=True)
+        print(f"[经济系统管理员] 服务器 {guild_id} 物品已移除: {item_removed_data['name']} (Slug: {item_slug_to_remove})，操作者: {interaction.user.id}")
+    # else 情况已在上面的检查中处理
+
+@eco_admin_group.command(name="edit_shop_item", description="编辑商店中现有物品的属性。")
+@app_commands.describe(
+    item_identifier="要编辑的物品的当前名称或ID。",
+    new_price=f"(可选) 新的价格 ({ECONOMY_CURRENCY_NAME})。",
+    new_description="(可选) 新的描述。",
+    new_stock="(可选) 新的库存数量 (-1 表示无限)。",
+    new_purchase_message="(可选) 新的购买成功私信消息。"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def eco_admin_edit_shop_item(
+    interaction: discord.Interaction,
+    item_identifier: str,
+    new_price: Optional[app_commands.Range[int, 0, None]] = None,
+    new_description: Optional[str] = None,
+    new_stock: Optional[int] = None,
+    new_purchase_message: Optional[str] = None
+):
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    guild_id = interaction.guild_id
+
+    if new_price is None and new_description is None and new_stock is None and new_purchase_message is None:
+        await interaction.followup.send("❌ 你至少需要提供一个要修改的属性。", ephemeral=True)
+        return
+
+    guild_shop = shop_items.get(guild_id, {})
+    item_slug_to_edit = get_item_slug(item_identifier)
+    item_data = guild_shop.get(item_slug_to_edit)
+
+    if not item_data: # 尝试通过名称查找
+        for slug, data_val in guild_shop.items():
+            if data_val['name'].lower() == item_identifier.lower():
+                item_data = data_val
+                item_slug_to_edit = slug
+                break
+    
+    if not item_data:
+        await interaction.followup.send(f"❌ 未在商店中找到名为或ID为 **'{item_identifier}'** 的物品。", ephemeral=True)
+        return
+
+    updated_fields = []
+    if new_price is not None:
+        item_data["price"] = new_price
+        updated_fields.append(f"价格为 {new_price} {ECONOMY_CURRENCY_NAME}")
+    if new_description is not None:
+        item_data["description"] = new_description
+        updated_fields.append("描述")
+    if new_stock is not None:
+        item_data["stock"] = new_stock
+        updated_fields.append(f"库存为 {'无限' if new_stock == -1 else new_stock}")
+    if new_purchase_message is not None: # 允许设置为空字符串以移除消息
+        item_data["purchase_message"] = new_purchase_message if new_purchase_message.strip() else None
+        updated_fields.append("购买后消息")
+    
+    shop_items[guild_id][item_slug_to_edit] = item_data # 更新物品
+    save_economy_data()
+
+    await interaction.followup.send(f"✅ 物品 **{item_data['name']}** (`{item_slug_to_edit}`) 已更新以下属性：{', '.join(updated_fields)}。", ephemeral=True)
+    print(f"[经济系统管理员] 服务器 {guild_id} 物品 '{item_data['name']}' 已由 {interaction.user.id} 编辑。字段: {', '.join(updated_fields)}")
+
+# --- (经济系统管理员指令结束) ---
+
+# 将新的指令组添加到机器人树
+# 这应该与其他 bot.tree.add_command 调用一起完成
+# bot.tree.add_command(eco_group) # 将在末尾添加
+# manage_group 已添加，eco_admin_group 作为其子级会自动随 manage_group 添加。
 
 # --- Add the command groups to the bot tree ---
 bot.tree.add_command(manage_group)
@@ -3800,6 +4482,7 @@ bot.tree.add_command(voice_group)
 bot.tree.add_command(ai_group)
 bot.tree.add_command(faq_group)
 bot.tree.add_command(relay_msg_group)
+bot.tree.add_command(eco_group) # 添加新的面向用户的经济系统指令组
 
 # --- Run the Bot ---
 if __name__ == "__main__":
@@ -3827,11 +4510,16 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ 机器人启动过程中发生致命错误: {e}")
         finally:
-            # Clean up session when bot closes
-            if hasattr(bot, 'http_session') and bot.http_session:
+            if ECONOMY_ENABLED: # 添加此行
+                save_economy_data()
+                print("[经济系统] 数据已在关闭时保存。")
+            # 关闭机器人时清理会话
+            if hasattr(bot, 'http_session') and bot.http_session and not bot.http_session.closed: # 检查会话是否已关闭
                 await bot.http_session.close()
                 print("已关闭 aiohttp 会话。")
-            await bot.close() # Ensure bot connection is closed properly
+            # await bot.close() # bot.start() 退出或出错时通常会调用此方法，确保不要重复调用。
+            # 如果你的框架在 bot.start() 结束或出错后没有自动处理 bot.close()，则取消注释此行。
+            print("机器人已关闭。") # 通用关闭消息
 
     try:
         asyncio.run(main())
