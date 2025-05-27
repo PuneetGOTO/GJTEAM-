@@ -599,7 +599,7 @@ MOD_ALERT_ROLE_IDS = [
 PUBLIC_WARN_LOG_CHANNEL_ID = 1374390176591122582 # <--- 替换! 示例 ID
 
 # !!! 重要：替换成你的启动通知频道ID !!!
-STARTUP_MESSAGE_CHANNEL_ID = 1374390176591122582 # <--- 替换! 示例 ID (例如: 138000000000000000)
+STARTUP_MESSAGE_CHANNEL_ID = 1374372204531159081 # <--- 替换! 示例 ID (例如: 138000000000000000)
                                 # 如果为 0 或未配置，则不发送启动消息
 
 # --- Bad Word Detection Config & Storage (In-Memory) ---
@@ -1140,9 +1140,32 @@ def get_guild_chat_earn_config(guild_id: int) -> Dict[str, int]:
             "cooldown": config.get("chat_earn_cooldown", defaults["cooldown"]) # 确保键名匹配
         }
     return defaults
-
+# --- 辅助函数 (如果还没有，添加 get_item_slug) ---
 def get_item_slug(item_name: str) -> str:
     return "_".join(item_name.lower().split()).strip() # 简单的 slug：小写，空格转下划线
+
+# --- 定义商店购买按钮的视图 ---
+class ShopItemBuyView(discord.ui.View):
+    def __init__(self, items_on_page: Dict[str, Dict[str, Any]], guild_id: int):
+        super().__init__(timeout=None) # 持久视图或根据需要设置超时
+
+        for slug, item_data in items_on_page.items():
+            # 为每个物品创建一个购买按钮
+            # custom_id 格式: buy_<guild_id>_<item_slug>
+            buy_button = discord.ui.Button(
+                label=f"购买 {item_data['name']} ({ECONOMY_CURRENCY_SYMBOL}{item_data['price']})",
+                style=discord.ButtonStyle.green,
+                custom_id=f"shop_buy_{guild_id}_{slug}", # 确保 custom_id 唯一且可解析
+                emoji="🛒" # 可选的表情符号
+            )
+            # 按钮的回调将在 Cog 中通过 on_interaction 监听 custom_id 来处理，
+            # 或者，如果你想直接在这里定义回调（不推荐用于大量动态按钮）：
+            # async def button_callback(interaction: discord.Interaction, current_slug=slug): # 使用默认参数捕获slug
+            #     # 这个回调逻辑会变得复杂，因为需要访问 GuildMusicState 等
+            #     # 更好的方式是在主 Cog 中监听 custom_id
+            #     await interaction.response.send_message(f"你点击了购买 {current_slug}", ephemeral=True)
+            # buy_button.callback = button_callback
+            self.add_item(buy_button)
 
 async def grant_item_purchase(interaction: discord.Interaction, user: discord.Member, item_data: Dict[str, Any]):
     """处理购买物品的效果。"""
@@ -1179,6 +1202,129 @@ async def grant_item_purchase(interaction: discord.Interaction, user: discord.Me
         except Exception as e:
             print(f"[经济系统错误] 发送物品 '{item_data['name']}' 的购买私信给用户 {user.id} 时出错: {e}")
 # --- Ticket Tool UI Views ---
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    # 首先，让默认的指令树处理器处理斜杠指令和已注册的组件交互
+    # await bot.process_application_commands(interaction) # discord.py v2.0+
+    # 对于 discord.py 的旧版本或如果你想更明确地处理，可以保留或调整
+    # 如果你的按钮回调是直接定义在 View 类中的，这部分可能不需要显式处理
+
+    # 处理自定义的商店购买按钮
+    if interaction.type == discord.InteractionType.component:
+        custom_id = interaction.data.get("custom_id")
+        if custom_id and custom_id.startswith("shop_buy_"):
+            # 解析 custom_id: shop_buy_<guild_id>_<item_slug>
+            parts = custom_id.split("_")
+            if len(parts) >= 4: # shop, buy, guildid, slug (slug可能含下划线)
+                try:
+                    action_guild_id = int(parts[2])
+                    item_slug_to_buy = "_".join(parts[3:]) # 重新组合 slug
+                    
+                    # 确保交互的 guild_id 与按钮中的 guild_id 一致
+                    if interaction.guild_id != action_guild_id:
+                        await interaction.response.send_message("❌ 按钮似乎来自其他服务器。", ephemeral=True)
+                        return
+
+                    # --- 执行购买逻辑 (与 /eco buy 非常相似) ---
+                    if not ECONOMY_ENABLED:
+                        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+                        return
+
+                    # 确保先响应交互，避免超时
+                    await interaction.response.defer(ephemeral=True, thinking=True) # thinking=True 显示"思考中"
+
+                    guild_id = interaction.guild_id
+                    user = interaction.user # interaction.user 就是点击按钮的用户 (discord.Member)
+
+                    # item_to_buy_data = shop_items.get(guild_id, {}).get(item_slug_to_buy) # 内存版本
+                    item_to_buy_data = database.db_get_shop_item(guild_id, item_slug_to_buy) # 数据库版本
+
+                    if not item_to_buy_data:
+                        await interaction.followup.send(f"❌ 无法找到物品 `{item_slug_to_buy}`。可能已被移除。", ephemeral=True)
+                        return
+
+                    item_price = item_to_buy_data['price']
+                    # user_balance = get_user_balance(guild_id, user.id) # 内存版本
+                    user_balance = database.db_get_user_balance(guild_id, user.id, ECONOMY_DEFAULT_BALANCE) # 数据库版本
+
+                    if user_balance < item_price:
+                        await interaction.followup.send(f"❌ 你的{ECONOMY_CURRENCY_NAME}不足以购买 **{item_to_buy_data['name']}** (需要 {item_price}，你有 {user_balance})。", ephemeral=True)
+                        return
+
+                    item_stock = item_to_buy_data.get("stock", -1)
+                    if item_stock == 0:
+                        await interaction.followup.send(f"❌ 抱歉，物品 **{item_to_buy_data['name']}** 已售罄。", ephemeral=True)
+                        return
+                    
+                    granted_role_id = item_to_buy_data.get("role_id")
+                    if granted_role_id and isinstance(user, discord.Member):
+                        if discord.utils.get(user.roles, id=granted_role_id):
+                            await interaction.followup.send(f"ℹ️ 你已经拥有物品 **{item_to_buy_data['name']}** 关联的身份组了。", ephemeral=True)
+                            return
+                    
+                    # 使用数据库的事务进行购买
+                    conn = database.get_db_connection()
+                    purchase_successful = False
+                    try:
+                        conn.execute("BEGIN")
+                        balance_updated = database.db_update_user_balance(guild_id, user.id, -item_price, default_balance=ECONOMY_DEFAULT_BALANCE)
+                        
+                        stock_updated_or_not_needed = True
+                        if balance_updated and item_stock != -1:
+                            new_stock = item_to_buy_data.get("stock", 0) - 1
+                            if not database.db_update_shop_item_stock(guild_id, item_slug_to_buy, new_stock): # 这个函数在 database.py 中
+                                 stock_updated_or_not_needed = False
+                        
+                        if balance_updated and stock_updated_or_not_needed:
+                            conn.commit()
+                            purchase_successful = True
+                        else:
+                            conn.rollback()
+                    except Exception as db_exc:
+                        if conn: conn.rollback()
+                        print(f"[Shop Buy Button DB Error] {db_exc}")
+                        await interaction.followup.send(f"❌ 购买时发生数据库错误。", ephemeral=True)
+                        return # 退出，不继续
+                    finally:
+                        if conn: conn.close()
+
+                    if purchase_successful:
+                        await grant_item_purchase(interaction, user, item_to_buy_data) # 这个函数负责授予身份组和发送私信
+                        await interaction.followup.send(f"🎉 恭喜！你已成功购买 **{item_to_buy_data['name']}**！", ephemeral=True)
+                        print(f"[Economy][Button Buy] User {user.id} bought '{item_to_buy_data['name']}' for {item_price} in guild {guild_id}.")
+                        
+                        # 可选: 更新原始商店消息中的库存显示（如果适用且可行）
+                        # 这比较复杂，因为需要找到原始消息并修改其 embed 或 view
+                        # 简单的做法是让用户重新执行 /eco shop 查看最新库存
+                    else:
+                        await interaction.followup.send(f"❌ 购买失败，更新数据时发生错误。请重试。", ephemeral=True)
+
+                except ValueError: # int(parts[2]) 转换失败
+                    await interaction.response.send_message("❌ 按钮ID格式错误。",ephemeral=True)
+                except Exception as e_button:
+                    print(f"Error processing shop_buy button: {e_button}")
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message("处理购买时发生未知错误。",ephemeral=True)
+                    else:
+                        await interaction.followup.send("处理购买时发生未知错误。",ephemeral=True)
+            # 你可以在这里添加 else if 来处理其他 custom_id 的组件
+        # else: # 如果不是组件交互，或者 custom_id 不匹配，则让默认的指令树处理
+    # 重要：如果你的机器人也使用了 cogs，并且 cog 中有自己的 on_interaction 监听器，
+    # 或者你的按钮回调是直接在 View 中定义的，你需要确保这里的 on_interaction 不会干扰它们。
+    # 一种常见的做法是在 Cog 的 listener 中返回，或者在这里只处理未被其他地方处理的交互。
+    # 对于简单的单文件机器人，这种方式可以工作。
+    # 如果你的 discord.py 版本较高，并且正确使用了 bot.process_application_commands，
+    # 那么已注册的视图回调会自动被调用，你可能只需要处理这种动态生成的、没有直接回调的按钮。
+    # 为了安全，先确保 bot.process_application_commands 或类似的东西被调用。
+    # 如果你的指令树可以正常处理已注册的 view 回调，那么上面的 on_interaction 只需要 shop_buy_ 部分。
+    # 很多现代 discord.py 模板会为你处理这个。
+
+    # 确保其他交互（如其他按钮、选择菜单、模态框）也能被正常处理
+    # 如果你的 bot 对象有 process_application_commands，调用它
+    if hasattr(bot, "process_application_commands"):
+         await bot.process_application_commands(interaction)
+    # 否则，你可能需要依赖 discord.py 内置的事件分发，或者自己实现更复杂的路由
 
 # View for the button to close a ticket
 # View for the button to close a ticket
@@ -4103,6 +4249,7 @@ async def eco_transfer(interaction: discord.Interaction, receiver: discord.Membe
     else:
         await interaction.followup.send(f"❌ 转账失败，发生内部错误。请重试或联系管理员。", ephemeral=True)
 
+# --- 修改 /eco shop 指令 ---
 @eco_group.command(name="shop", description=f"查看可用物品的商店。")
 async def eco_shop(interaction: discord.Interaction):
     if not ECONOMY_ENABLED:
@@ -4114,40 +4261,55 @@ async def eco_shop(interaction: discord.Interaction):
         await interaction.response.send_message("此命令只能在服务器中使用。", ephemeral=True)
         return
 
-    guild_shop_items = shop_items.get(guild_id, {})
+    # guild_shop_items = shop_items.get(guild_id, {}) # 如果使用内存字典
+    guild_shop_items = database.db_get_shop_items(guild_id) # 如果使用数据库
+
     if not guild_shop_items:
         await interaction.response.send_message(f"商店目前是空的。让管理员添加一些物品吧！", ephemeral=True)
         return
 
-    embed = discord.Embed(title=f"{ECONOMY_CURRENCY_SYMBOL} {interaction.guild.name} 商店", color=discord.Color.blurple())
-    
-    item_list_str = []
+    embed = discord.Embed(
+        title=f"{ECONOMY_CURRENCY_SYMBOL} {interaction.guild.name} 商店",
+        color=discord.Color.blurple()
+    )
+    # 你可以在这里设置商店的通用插图
+    # embed.set_image(url="你的商店插图URL") # 例如
+    # embed.set_thumbnail(url="你的商店缩略图URL")
+
+    description_parts = []
+    items_for_view = {} # 存储当前页面/所有物品以便创建按钮
+
+    # 简单实现，先显示所有物品的描述，按钮会根据这些物品创建
+    # 如果物品过多，这里也需要分页逻辑来决定哪些物品放入 items_for_view
+    # 暂时我们假设物品数量不多
     for slug, item in guild_shop_items.items():
         stock_info = f"(库存: {item['stock']})" if item.get('stock', -1) != -1 else "(无限库存)"
-        role_info = ""
+        role_name_info = ""
         if item.get("role_id"):
             role = interaction.guild.get_role(item['role_id'])
-            role_info = f" (奖励身份组: {role.mention if role else '未知身份组'})"
-
-        item_list_str.append(
-            f"**{item['name']}** (`{slug}`) - {ECONOMY_CURRENCY_SYMBOL} **{item['price']}** {stock_info}\n"
-            f"> *{item.get('description', '无描述')}*{role_info}\n"
+            if role:
+                role_name_info = f" (奖励身份组: **{role.name}**)"
+        
+        description_parts.append(
+            f"🛍️ **{item['name']}** - {ECONOMY_CURRENCY_SYMBOL}**{item['price']}** {stock_info}\n"
+            f"   📝 *{item.get('description', '无描述')}*{role_name_info}\n"
+            # f"   ID: `{slug}`\n" # 用户不需要看到slug，按钮会处理它
         )
-    
-    if not item_list_str: # 如果 guild_shop_items 非空，理论上不应发生，但作为安全措施
+        items_for_view[slug] = item # 添加到用于视图的字典
+
+    if not description_parts:
         await interaction.response.send_message(f"商店中没有可显示的物品。", ephemeral=True)
         return
 
-    # 简单分页（如果物品过多，Discord embed description 有限制）
-    # 目前，仅显示所有或有限数量。对于大量物品，带按钮的视图会更好。
-    full_description = "\n".join(item_list_str)
-    if len(full_description) > 3900 : # 为标题/页脚留一些缓冲区
-        embed.description = "\n".join(item_list_str[:ECONOMY_MAX_SHOP_ITEMS_PER_PAGE]) + f"\n\n*还有更多物品未显示...*"
-    else:
-        embed.description = full_description
-        
-    embed.set_footer(text=f"使用 /eco buy <物品名称或ID> 来购买。")
-    await interaction.response.send_message(embed=embed, ephemeral=False)
+    embed.description = "\n".join(description_parts[:ECONOMY_MAX_SHOP_ITEMS_PER_PAGE * 2]) # 限制描述长度
+    if len(description_parts) > ECONOMY_MAX_SHOP_ITEMS_PER_PAGE * 2:
+        embed.description += "\n\n*还有更多物品...*"
+
+    embed.set_footer(text=f"点击下方按钮直接购买物品。")
+    
+    # 创建并发送带有按钮的视图
+    view = ShopItemBuyView(items_for_view, guild_id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
 
 @eco_group.command(name="buy", description=f"从商店购买一件物品。")
