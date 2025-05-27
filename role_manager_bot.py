@@ -3,7 +3,7 @@
 import discord
 from discord import app_commands, ui # Added ui
 from discord.ext import commands
-from typing import Dict
+from typing import Dict, Any
 from discord.utils import get
 import os
 import time # 用于计算 API 延迟
