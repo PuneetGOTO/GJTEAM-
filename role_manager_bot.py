@@ -3,13 +3,12 @@
 import discord
 from discord import app_commands, ui # Added ui
 from discord.ext import commands
-from typing import Dict, Any
 from discord.utils import get
 import os
 import time # 用于计算 API 延迟
 import datetime
 import asyncio
-from typing import Optional, Union
+from typing import Optional, Union, Any, Dict, List # 根据你的实际使用情况添加 List 等
 import requests # Required for DeepSeek API & Announce fallback
 import json     # Required for DeepSeek API
 try:
@@ -599,7 +598,7 @@ MOD_ALERT_ROLE_IDS = [
 PUBLIC_WARN_LOG_CHANNEL_ID = 1374390176591122582 # <--- 替换! 示例 ID
 
 # !!! 重要：替换成你的启动通知频道ID !!!
-STARTUP_MESSAGE_CHANNEL_ID = 1374372204531159081 # <--- 替换! 示例 ID (例如: 138000000000000000)
+STARTUP_MESSAGE_CHANNEL_ID = 1374390176591122582 # <--- 替换! 示例 ID (例如: 138000000000000000)
                                 # 如果为 0 或未配置，则不发送启动消息
 
 # --- Bad Word Detection Config & Storage (In-Memory) ---
