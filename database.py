@@ -97,30 +97,83 @@ def initialize_database():
 def db_get_user_balance(guild_id: int, user_id: int, default_balance: int) -> int:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(f"SELECT balance FROM {TABLE_USER_BALANCES} WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-    row = cursor.fetchone()
-    conn.close()
-    return row["balance"] if row else default_balance
+    function_name = "db_get_user_balance" # 用于日志
+    print(f"[DB DEBUG] [{function_name}] Called for guild={guild_id}, user={user_id}, with default_balance_param={default_balance}")
+    balance_to_return = default_balance 
+    try:
+        cursor.execute(f"SELECT balance FROM {TABLE_USER_BALANCES} WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+        row = cursor.fetchone()
+        if row:
+            balance_to_return = row["balance"]
+            print(f"[DB DEBUG] [{function_name}] Found balance in DB: {balance_to_return} for user {user_id} in guild {guild_id}")
+        else:
+            print(f"[DB DEBUG] [{function_name}] No balance found in DB for user {user_id} in guild {guild_id}, will return default_balance_param: {default_balance}")
+    except sqlite3.Error as e:
+        print(f"[DB Economy Error] [{function_name}] Error querying balance for user {user_id} in guild {guild_id}: {e}")
+    finally:
+        if conn:
+            conn.close()
+    print(f"[DB DEBUG] [{function_name}] Returning balance: {balance_to_return} for user {user_id} in guild {guild_id}")
+    return balance_to_return
 
 def db_update_user_balance(guild_id: int, user_id: int, amount: int, is_delta: bool = True, default_balance: int = 0) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
+    function_name = "db_update_user_balance" # 用于日志
+    print(f"[DB DEBUG] [{function_name}] Called with guild={guild_id}, user={user_id}, amount={amount}, is_delta={is_delta}, default_balance_for_get={default_balance}")
     try:
-        current_balance = db_get_user_balance(guild_id, user_id, default_balance)
-        new_balance = (current_balance + amount) if is_delta else amount
-        if new_balance < 0: return False
+        current_balance_for_delta_calc = 0
+        if is_delta:
+            current_balance_for_delta_calc = db_get_user_balance(guild_id, user_id, default_balance) 
+            print(f"[DB DEBUG] [{function_name}] (is_delta=True): current_balance_for_delta_calc from db_get_user_balance = {current_balance_for_delta_calc}")
+
+        new_balance = (current_balance_for_delta_calc + amount) if is_delta else amount
+        
+        if new_balance < 0:
+            print(f"[DB DEBUG] [{function_name}] Calculated new_balance ({new_balance}) is negative. Operation failed for user {user_id}.")
+            return False
+
+        print(f"[DB DEBUG] [{function_name}] Attempting to execute UPSERT for guild={guild_id}, user={user_id} with new_balance={new_balance}")
 
         cursor.execute(f"""
         INSERT INTO {TABLE_USER_BALANCES} (guild_id, user_id, balance) VALUES (?, ?, ?)
         ON CONFLICT(guild_id, user_id) DO UPDATE SET balance = excluded.balance
         """, (guild_id, user_id, new_balance))
-        conn.commit()
-        return True
+        
+        # 检查是否真的写入了
+        if cursor.rowcount > 0:
+            print(f"[DB DEBUG] [{function_name}] UPSERT execute successful. Rows affected (directly by execute): {cursor.rowcount} for user {user_id}")
+            conn.commit()
+            print(f"[DB DEBUG] [{function_name}] Balance update committed for user {user_id}.")
+            return True
+        else:
+            # 如果 rowcount 是 0，对于 UPSERT，可能意味着值没有改变，或者没有发生 INSERT/UPDATE
+            # 这种情况理论上不应该阻止我们认为操作“逻辑上”成功了（比如设置一个已经是该值的值）
+            # 但为了调试，我们先严格一点
+            print(f"[DB DEBUG] [{function_name}] UPSERT execute returned rowcount 0 for user {user_id}. Assuming value unchanged or no operation. Committing anyway.")
+            conn.commit() # 即使是0，也尝试提交，以防万一
+            # 我们可以再查询一次来验证值是否是我们期望的 new_balance
+            # verification_balance = db_get_user_balance(guild_id, user_id, -1) # 用一个特殊默认值
+            # if verification_balance == new_balance:
+            #     print(f"[DB DEBUG] [{function_name}] Verification query matches new_balance: {new_balance}")
+            #     return True
+            # else:
+            #     print(f"[DB DEBUG] [{function_name}] Verification query MISMATCH. DB has {verification_balance}, expected {new_balance}. Operation considered failed.")
+            #     return False
+            return True # 暂时假设 rowcount 0 且 commit 后是成功的，如果设置的值和原值一样
+            
     except sqlite3.Error as e:
-        print(f"[DB Economy Error] 更新用户余额失败 (guild: {guild_id}, user: {user_id}): {e}")
+        print(f"[DB Economy Error] [{function_name}] SQLite Error updating balance for user {user_id} (guild: {guild_id}): {e}")
+        if conn:
+            try:
+                conn.rollback()
+                print(f"[DB DEBUG] [{function_name}] Rollback attempted on error for user {user_id}.")
+            except sqlite3.Error as rb_e:
+                print(f"[DB Economy Error] [{function_name}] Error during rollback for user {user_id}: {rb_e}")
         return False
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 def db_get_leaderboard(guild_id: int, limit: int) -> List[Tuple[int, int]]:
     conn = get_db_connection()
@@ -161,11 +214,19 @@ def db_set_guild_chat_earn_config(guild_id: int, amount: int, cooldown: int):
 # == 经济系统 - 商店操作
 # =========================================
 def db_get_shop_items(guild_id: int) -> Dict[str, Dict[str, Any]]:
+    print(f"[DB DEBUG] Getting shop items for guild_id: {guild_id}") # 新增
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(f"SELECT item_slug, name, price, description, role_id, stock, purchase_message FROM {TABLE_SHOP_ITEMS} WHERE guild_id = ?", (guild_id,))
-    items = {row["item_slug"]: dict(row) for row in cursor.fetchall()}
+    items = {}
+    fetched_rows = cursor.fetchall() # 先获取所有行
+    print(f"[DB DEBUG] Fetched {len(fetched_rows)} rows for shop items.") # 新增
+    for row in fetched_rows:
+        items[row["item_slug"]] = dict(row)
+        print(f"[DB DEBUG] Loaded item: {row['item_slug']} - {row['name']}") # 新增
     conn.close()
+    if not items:
+        print(f"[DB DEBUG] No items found in DB for guild {guild_id}, returning empty dict.") # 新增
     return items
 
 def db_get_shop_item(guild_id: int, item_slug: str) -> Optional[Dict[str, Any]]:
@@ -177,7 +238,8 @@ def db_get_shop_item(guild_id: int, item_slug: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 def db_add_shop_item(guild_id: int, item_slug: str, name: str, price: int, description: Optional[str],
-                       role_id: Optional[int], stock: int, purchase_message: Optional[str]) -> bool:
+                       role_id: Optional[int], stock: int, purchase_message: Optional[str]) -> Tuple[bool, str]: # 修改类型提示
+    print(f"[DB DEBUG] db_add_shop_item: Attempting to add item: guild={guild_id}, slug='{item_slug}', name='{name}', price={price}, stock={stock}")
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -186,13 +248,16 @@ def db_add_shop_item(guild_id: int, item_slug: str, name: str, price: int, descr
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (guild_id, item_slug, name, price, description, role_id, stock, purchase_message))
         conn.commit()
-        return True
+        print(f"[DB DEBUG] db_add_shop_item: Item add committed. Rows affected: {cursor.rowcount} for slug '{item_slug}'")
+        return True, "物品已成功添加到数据库。" # <--- 返回元组
     except sqlite3.IntegrityError:
-        print(f"[DB Economy Error] 添加商店物品失败 (guild: {guild_id}, slug: {item_slug}): 可能物品已存在。")
-        return False
+        msg = f"可能物品ID '{item_slug}' 已存在。"
+        print(f"[DB Economy Error] db_add_shop_item: IntegrityError (guild: {guild_id}, slug: {item_slug}): {msg}")
+        return False, msg # <--- 返回元组
     except sqlite3.Error as e:
-        print(f"[DB Economy Error] 添加商店物品失败 (guild: {guild_id}, slug: {item_slug}): {e}")
-        return False
+        msg = f"数据库错误: {e}"
+        print(f"[DB Economy Error] db_add_shop_item: SQLite Error (guild: {guild_id}, slug: {item_slug}): {msg}")
+        return False, msg # <--- 返回元组
     finally:
         conn.close()
 
