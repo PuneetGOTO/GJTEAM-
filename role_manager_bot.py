@@ -23,6 +23,7 @@ import io
 import html
 from collections import deque
 import sys
+import database
 
 # 在尝试获取环境变量之前加载 .env 文件
 # 指定 .env 文件的路径
@@ -1342,8 +1343,8 @@ async def on_ready():
     print(f'以 {bot.user.name} ({bot.user.id}) 身份登录')
 
     if ECONOMY_ENABLED: # 添加此块
-        load_economy_data()
-        print("[经济系统] 系统已初始化。")
+        database.initialize_database() # <--- 确保是调用这个！
+        print("[经济系统] 数据库已初始化，经济系统准备就绪。")
 
     print('正在同步应用程序命令...')
     try:
@@ -4178,11 +4179,14 @@ async def eco_balance(interaction: discord.Interaction, user: Optional[discord.M
         await interaction.response.send_message(f"🤖 机器人没有{ECONOMY_CURRENCY_NAME}余额。", ephemeral=True)
         return
 
-    balance = get_user_balance(guild_id, target_user.id)
+    # 从数据库获取最新的余额
+    balance = database.db_get_user_balance(guild_id, target_user.id, ECONOMY_DEFAULT_BALANCE) 
     
+    print(f"[COMMAND /eco balance] Fetched balance for {target_user.id} in guild {guild_id}: {balance}") # 新增调试
+
     embed = discord.Embed(
         title=f"{ECONOMY_CURRENCY_SYMBOL} {target_user.display_name}的余额",
-        description=f"**{balance}** {ECONOMY_CURRENCY_NAME}",
+        description=f"**{balance}** {ECONOMY_CURRENCY_NAME}", # 确保这里用的是从数据库获取的 balance
         color=discord.Color.gold()
     )
     if target_user.avatar:
@@ -4429,15 +4433,47 @@ eco_admin_group = app_commands.Group(name="eco_admin", description=f"管理员�
 @app_commands.describe(user="要给予货币的用户。", amount=f"要给予的{ECONOMY_CURRENCY_NAME}数量。")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def eco_admin_give(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
-    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
+    
     guild_id = interaction.guild_id
-    if user.bot: await interaction.response.send_message(f"❌ 不能给机器人{ECONOMY_CURRENCY_NAME}。", ephemeral=True); return
+    if not guild_id: # 通常对于斜杠命令 guild_id 存在
+        await interaction.response.send_message("此命令只能在服务器内执行。", ephemeral=True)
+        return
 
-    if update_user_balance(guild_id, user.id, amount):
-        save_economy_data()
-        await interaction.response.send_message(f"✅ 已成功给予 {user.mention} **{amount}** {ECONOMY_CURRENCY_NAME}。\n其新余额为: {get_user_balance(guild_id, user.id)} {ECONOMY_CURRENCY_NAME}。", ephemeral=False)
-        print(f"[经济系统管理员] {interaction.user.id} 在服务器 {guild_id} 给予了 {user.id} {amount} {ECONOMY_CURRENCY_NAME}。")
-    else: await interaction.response.send_message(f"❌ 操作失败。", ephemeral=True)
+    if user.bot:
+        await interaction.response.send_message(f"❌ 不能给机器人{ECONOMY_CURRENCY_NAME}。", ephemeral=True)
+        return
+    
+    if amount <= 0: # 确保给予的金额是正数
+        await interaction.response.send_message(f"❌ 给予的金额必须大于0。", ephemeral=True)
+        return
+
+    print(f"[COMMAND /eco_admin give] User {interaction.user.id} attempting to give {amount} to target_user {user.id} in guild {guild_id}")
+
+    # 调用数据库函数进行更新，is_delta=True 表示增加余额
+    # ECONOMY_DEFAULT_BALANCE 作为 db_get_user_balance (被 db_update_user_balance 调用) 的备用初始值
+    update_success = database.db_update_user_balance(
+        guild_id, 
+        user.id, 
+        amount, 
+        is_delta=True, # 明确这是增量操作
+        default_balance=ECONOMY_DEFAULT_BALANCE 
+    )
+
+    if update_success:
+        # 更新成功后，我们再次从数据库获取余额以确认并显示给用户
+        final_balance = database.db_get_user_balance(guild_id, user.id, ECONOMY_DEFAULT_BALANCE) # 使用默认值以防万一
+        
+        print(f"[COMMAND /eco_admin give] db_update_user_balance returned success. Final balance for {user.id} is {final_balance}")
+
+        await interaction.response.send_message(f"✅ 已成功给予 {user.mention} **{amount}** {ECONOMY_CURRENCY_NAME}。\n其新余额为: **{final_balance}** {ECONOMY_CURRENCY_NAME}。", ephemeral=False)
+        print(f"[经济系统管理员] {interaction.user.id} 在服务器 {guild_id} 成功给予了用户 {user.id} {amount} {ECONOMY_CURRENCY_NAME}。新数据库余额: {final_balance}")
+    else:
+        # 如果 db_update_user_balance 返回 False，可能是因为尝试使余额为负（虽然这里是给予，不太可能）或数据库错误
+        await interaction.response.send_message(f"❌ 操作失败，无法在数据库中更新用户 {user.mention} 的余额。请检查日志。", ephemeral=True)
+        print(f"[经济系统管理员] 给予用户 {user.id} (guild: {guild_id}) {amount} {ECONOMY_CURRENCY_NAME} 失败 (db_update_user_balance 返回 False)。")
 
 @eco_admin_group.command(name="take", description=f"从用户处移除指定数量的{ECONOMY_CURRENCY_NAME}。")
 @app_commands.describe(user="要移除其货币的用户。", amount=f"要移除的{ECONOMY_CURRENCY_NAME}数量。")
@@ -4464,15 +4500,50 @@ async def eco_admin_take(interaction: discord.Interaction, user: discord.Member,
 @app_commands.describe(user="要设置其余额的用户。", amount=f"要设置的{ECONOMY_CURRENCY_NAME}数量。")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def eco_admin_set(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 0, None]):
-    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
+    
     guild_id = interaction.guild_id
-    if user.bot: await interaction.response.send_message(f"❌ 机器人没有{ECONOMY_CURRENCY_NAME}。", ephemeral=True); return
+    if not guild_id: # 对于斜杠命令通常 guild_id 存在
+        await interaction.response.send_message("此命令只能在服务器内执行。", ephemeral=True)
+        return
 
-    if update_user_balance(guild_id, user.id, amount, is_delta=False):
-        save_economy_data()
-        await interaction.response.send_message(f"✅ 已成功将 {user.mention} 的余额设置为 **{amount}** {ECONOMY_CURRENCY_NAME}。", ephemeral=False)
-        print(f"[经济系统管理员] {interaction.user.id} 在服务器 {guild_id} 将用户 {user.id} 的余额设置为 {amount}。")
-    else: await interaction.response.send_message(f"❌ 操作失败。", ephemeral=True)
+    if user.bot:
+        await interaction.response.send_message(f"❌ 机器人没有{ECONOMY_CURRENCY_NAME}。", ephemeral=True)
+        return
+
+    print(f"[COMMAND /eco_admin set] User {interaction.user.id} attempting to set balance for target_user {user.id} to {amount} in guild {guild_id}")
+
+    # 调用数据库函数进行更新，is_delta=False 表示直接设置值
+    # ECONOMY_DEFAULT_BALANCE 在这里作为 db_get_user_balance (被 db_update_user_balance 调用) 的备用值，
+    # 但由于 is_delta=False，它实际上不影响最终写入的 new_balance。
+    update_success = database.db_update_user_balance(
+        guild_id, 
+        user.id, 
+        amount, 
+        is_delta=False, 
+        default_balance=ECONOMY_DEFAULT_BALANCE 
+    )
+
+    if update_success:
+        # 更新成功后，我们再次从数据库获取余额以确认并显示给用户
+        # 确保这里的 default_balance 与 /eco balance 命令中使用的 default_balance 一致
+        # 并且与购买逻辑中获取余额时使用的 default_balance 一致
+        final_balance = database.db_get_user_balance(guild_id, user.id, ECONOMY_DEFAULT_BALANCE)
+        
+        print(f"[COMMAND /eco_admin set] db_update_user_balance returned success. Attempting to display final_balance: {final_balance}")
+
+        response_message = f"✅ 已成功将 {user.mention} 的余额设置为 **{final_balance}** {ECONOMY_CURRENCY_NAME}。"
+        if final_balance != amount: # 如果读取到的最终余额和我们设置的不一样，添加一个警告
+            response_message += f"\n⚠️ **注意：**设置值为 {amount}，但从数据库读取到的最终余额为 {final_balance}。请检查日志。"
+            print(f"🚨 [COMMAND /eco_admin set] BALANCE MISMATCH! Set to {amount}, but db_get_user_balance returned {final_balance} for user {user.id}")
+
+        await interaction.response.send_message(response_message, ephemeral=False)
+        print(f"[经济系统管理员] {interaction.user.id} 在服务器 {guild_id} 尝试将用户 {user.id} 的余额设置为 {amount}。数据库最终确认余额为: {final_balance}")
+    else:
+        await interaction.response.send_message(f"❌ 操作失败，无法在数据库中更新用户 {user.mention} 的余额。", ephemeral=True)
+        print(f"[经济系统管理员] 设置用户 {user.id} (guild: {guild_id}) 余额为 {amount} 失败 (db_update_user_balance 返回 False)。")
 
 @eco_admin_group.command(name="config_chat_earn", description="配置聊天获取货币的金额和冷却时间。")
 @app_commands.describe(
@@ -4501,7 +4572,7 @@ async def eco_admin_config_chat_earn(interaction: discord.Interaction, amount: a
 
 @eco_admin_group.command(name="add_shop_item", description="向商店添加新物品。")
 @app_commands.describe(
-    name="物品的名称 (唯一)。",
+    name="物品的名称 (唯一，将用于生成ID)。",
     price=f"物品的价格 ({ECONOMY_CURRENCY_NAME})。",
     description="物品的简短描述。",
     role="(可选) 购买此物品后授予的身份组。",
@@ -4515,31 +4586,61 @@ async def eco_admin_add_shop_item(
     price: app_commands.Range[int, 0, None], 
     description: str,
     role: Optional[discord.Role] = None,
-    stock: Optional[int] = -1,
+    stock: Optional[int] = -1, # 确保默认值与数据库函数预期一致
     purchase_message: Optional[str] = None
 ):
-    if not ECONOMY_ENABLED: await interaction.response.send_message("经济系统当前未启用。", ephemeral=True); return
-    guild_id = interaction.guild_id
-    item_slug = get_item_slug(name)
-
-    if guild_id not in shop_items:
-        shop_items[guild_id] = {}
+    if not ECONOMY_ENABLED:
+        await interaction.response.send_message("经济系统当前未启用。", ephemeral=True)
+        return
     
-    if item_slug in shop_items[guild_id]:
+    guild_id = interaction.guild_id
+    if not guild_id: # 对于斜杠命令，guild_id 应该总是存在
+        await interaction.response.send_message("此命令似乎不在服务器上下文中执行。", ephemeral=True)
+        return
+
+    item_slug = get_item_slug(name) # 生成物品的唯一ID/slug
+
+    # 调试打印 (可选，但在调试时有用)
+    print(f"[COMMAND /eco_admin add_shop_item] Attempting to add: guild_id={guild_id}, slug='{item_slug}', name='{name}'")
+
+    # 首先检查物品是否已存在于数据库中，避免重复添加导致 IntegrityError（虽然数据库层面会处理）
+    # 这一步是可选的，因为 database.db_add_shop_item 内部也会处理 IntegrityError，
+    # 但在这里先检查可以提供更友好的用户反馈。
+    existing_item_check = database.db_get_shop_item(guild_id, item_slug)
+    if existing_item_check:
         await interaction.response.send_message(f"❌ 商店中已存在名为/ID为 **'{name}'** (`{item_slug}`) 的物品。", ephemeral=True)
         return
 
-    shop_items[guild_id][item_slug] = {
-        "name": name,
-        "price": price,
-        "description": description,
-        "role_id": role.id if role else None,
-        "stock": stock if stock is not None else -1,
-        "purchase_message": purchase_message
-    }
-    save_economy_data()
-    await interaction.response.send_message(f"✅ 物品 **{name}** (`{item_slug}`) 已成功添加到商店！", ephemeral=True)
-    print(f"[经济系统管理员] 服务器 {guild_id} 物品已添加: {name} (Slug: {item_slug})，操作者: {interaction.user.id}")
+    # 调用数据库函数来添加物品
+    # 假设 database.db_add_shop_item 返回一个元组 (success: bool, message: str)
+    # 如果它只返回 bool，你需要相应调整下面的反馈逻辑
+    success, db_message = database.db_add_shop_item(
+        guild_id=guild_id,
+        item_slug=item_slug,
+        name=name, # 传递原始名称给数据库
+        price=price,
+        description=description,
+        role_id=role.id if role else None,
+        stock=stock if stock is not None else -1, # 处理 Optional[int] 为 int
+        purchase_message=purchase_message
+    )
+
+    if success:
+        await interaction.response.send_message(f"✅ 物品 **{name}** (`{item_slug}`) 已成功添加到商店！", ephemeral=True)
+        print(f"[经济系统管理员] 服务器 {guild_id} 物品已添加: {name} (Slug: {item_slug})，操作者: {interaction.user.id}")
+    else:
+        # db_message 应该包含来自数据库函数的具体错误信息
+        # 如果 db_add_shop_item 返回的 db_message 为空或不友好，你可能需要在这里构造一个更通用的错误消息
+        error_feedback = f"❌ 添加物品 **{name}** 到商店失败。"
+        if db_message and "可能物品已存在" in db_message: # 这是基于 db_add_shop_item 中 IntegrityError 的反馈
+             error_feedback = f"❌ 商店中已存在名为/ID为 **'{name}'** (`{item_slug}`) 的物品。"
+        elif db_message:
+            error_feedback += f" 原因: {db_message}"
+        else:
+            error_feedback += " 可能发生数据库错误或物品已存在。"
+        
+        await interaction.response.send_message(error_feedback, ephemeral=True)
+        print(f"[经济系统管理员] 添加物品失败: {name} (Slug: {item_slug}), Guild: {guild_id}, Reason from DB: {db_message}")
 
 
 @eco_admin_group.command(name="remove_shop_item", description="从商店移除物品。")
